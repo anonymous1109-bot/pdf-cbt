@@ -23,13 +23,12 @@ API_KEYS = [k for k in [
 ] if k]
 
 if not API_KEYS:
-    print("[Boot] WARNING: No GEMINI_KEY environment variables found! Using local fallback keys.")
-    API_KEYS = [
-        "AIzaSyB5xiHurVEdsP0gg-UvPZJfOBKSZ5NJSjY",
-        "AIzaSyDfkDecKODMKN8GW-YnxwkfL28HX3UdqdY",
-        "AIzaSyDzwQOwNiY-FpYHzVT1ZxWRVK7pnfx4iyQ",
-        "AIzaSyBAT7dFHjwyf6CgPtD2FK7wxqcs_OPsI5A",
-    ]
+    # We no longer hardcode keys here because they get disabled by Google if pushed to GitHub.
+    # Users must set GEMINI_KEY_1, GEMINI_KEY_2, etc. in their environment.
+    print("[Boot] ERROR: No API keys found in environment variables!")
+    print("[Boot] Please set GEMINI_KEY_1, GEMINI_KEY_2, etc. before running.")
+    # We leave API_KEYS empty so the app fails gracefully with a clear message rather than a 403.
+    API_KEYS = []
 
 _key_index = 0
 _key_lock = threading.Lock()
