@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Test Results — Analysis</title>
+    <link rel="stylesheet" href="/static/style.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js"></script>
+</head>
+<body>
+    <div class="result-page" id="resultApp">
+        <a href="/" class="back-home">← Upload New Test</a>
+        <div class="result-header">
+            <h1 class="result-title" id="resultTitle">Test Results</h1>
+            <p class="result-subtitle" id="resultSub"></p>
+        </div>
+        <div class="score-hero" id="scoreHero"></div>
+
+        <div class="section-title"><span>📊</span> Subject Breakdown</div>
+        <div class="subject-breakdown" id="subjectBreakdown"></div>
+
+        <div class="section-title"><span>🧠</span> AI Concept Analysis</div>
+        <div id="analysisSection"></div>
+
+        <div class="section-title"><span>📋</span> Question Review</div>
+        <div class="review-filter-bar" id="filterBar"></div>
+        <div id="questionReview"></div>
+    </div>
+
+    <script src="/static/result.js"></script>
+    <script>
+        const RESULT_ID = "{{ result_id }}";
+        initResult(RESULT_ID);
+    </script>
+</body>
+</html>

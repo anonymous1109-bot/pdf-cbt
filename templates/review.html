@@ -1,0 +1,436 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Review Diagrams — CBT</title>
+    <link rel="stylesheet" href="/static/style.css">
+    <style>
+        body { margin: 0; }
+        .rev-header { padding: 1rem 1.5rem; border-bottom: 1px solid var(--border); display:flex; align-items:center; gap:1rem; }
+        .rev-title { font-size:1.1rem; font-weight:700; flex:1; cursor:pointer; border-radius:4px; padding:2px 6px; }
+        .rev-title:hover { background:var(--bg-glass); }
+        .rev-title[contenteditable="true"] { outline:2px solid var(--accent); background:var(--bg-glass); }
+        .rev-meta { font-size:0.8rem; color:var(--text-secondary); }
+        .progress-bar { height:4px; background:var(--bg-glass); }
+        .progress-fill { height:100%; background:linear-gradient(90deg,var(--accent),#a78bfa); transition:width 0.3s; }
+
+        /* filters */
+        .filter-bar { display:flex; gap:0.4rem; padding:0.75rem 1.5rem; border-bottom:1px solid var(--border); flex-wrap:wrap; align-items:center; }
+        .filter-btn { padding:0.35rem 0.9rem; border-radius:999px; border:1px solid var(--border); background:none; color:var(--text-secondary); font-size:0.8rem; cursor:pointer; font-family:inherit; transition:all 0.15s; }
+        .filter-btn.active { background:var(--accent); color:#fff; border-color:var(--accent); }
+        .filter-count { margin-left:auto; font-size:0.8rem; color:var(--text-muted); }
+
+        /* question list */
+        .q-list { max-width:900px; margin:0 auto; padding:1rem 1.5rem 100px; }
+        .q-row { background:var(--bg-card); border:1px solid var(--border); border-radius:var(--radius); margin-bottom:0.75rem; display:flex; gap:1rem; padding:0.9rem 1rem; align-items:flex-start; transition:border-color 0.2s; }
+        .q-row.confirmed { border-color:rgba(34,197,94,0.35); }
+        .q-row:hover { border-color:rgba(99,102,241,0.3); }
+        .q-num { font-weight:800; color:var(--accent); font-size:0.85rem; min-width:2.2rem; }
+        .q-body { flex:1; min-width:0; }
+        .q-text { font-size:0.85rem; color:var(--text-secondary); line-height:1.5; margin-bottom:0.6rem; }
+        .q-badges { display:flex; gap:0.4rem; margin-bottom:0.6rem; flex-wrap:wrap; }
+        .badge { padding:0.15rem 0.55rem; border-radius:999px; font-size:0.7rem; font-weight:700; }
+        .badge-subj { background:rgba(99,102,241,0.15); color:#818cf8; }
+        .badge-has { background:rgba(34,197,94,0.12); color:#22c55e; }
+        .badge-no  { background:rgba(107,114,128,0.15); color:#9ca3af; }
+        .badge-ok  { background:rgba(34,197,94,0.2); color:#22c55e; }
+        .q-thumb { width:100px; height:70px; object-fit:contain; border:1px solid var(--border); border-radius:4px; background:#fff; cursor:pointer; flex-shrink:0; }
+        .q-thumb:hover { border-color:var(--accent); }
+        .q-actions { display:flex; gap:0.4rem; flex-wrap:wrap; margin-top:0.4rem; }
+        .btn-xs { padding:0.3rem 0.65rem; font-size:0.75rem; font-weight:600; border-radius:4px; border:1px solid var(--border); cursor:pointer; background:var(--bg-glass); color:var(--text-primary); transition:all 0.15s; font-family:inherit; }
+        .btn-xs:hover { border-color:var(--accent); color:var(--accent); }
+        .btn-xs.danger:hover { border-color:var(--red); color:var(--red); }
+        .btn-xs.success { background:rgba(34,197,94,0.12); border-color:rgba(34,197,94,0.3); color:#22c55e; }
+        .btn-xs.success.active, .btn-xs.success:hover { background:var(--green); color:#fff; }
+
+        /* finalize bar */
+        .finalize-bar { position:fixed; bottom:0; left:0; right:0; padding:0.85rem 1.5rem; background:var(--bg-secondary); border-top:1px solid var(--border); display:flex; align-items:center; justify-content:space-between; z-index:50; }
+        .btn-finalize { padding:0.75rem 2rem; background:linear-gradient(135deg,var(--accent),#7c3aed); color:#fff; border:none; border-radius:var(--radius); font-size:0.95rem; font-weight:700; cursor:pointer; }
+        .btn-finalize:disabled { opacity:0.4; cursor:not-allowed; }
+
+        /* ── Crop Overlay ── */
+        .crop-overlay { display:none; position:fixed; inset:0; background:rgba(0,0,0,0.88); z-index:200; flex-direction:column; }
+        .crop-overlay.active { display:flex; }
+        .crop-toolbar { padding:0.75rem 1.25rem; background:var(--bg-secondary); border-bottom:1px solid var(--border); display:flex; align-items:center; gap:0.75rem; flex-wrap:wrap; }
+        .crop-toolbar h2 { font-size:0.95rem; font-weight:700; flex:1; margin:0; }
+        .zoom-controls { display:flex; align-items:center; gap:0.4rem; background:var(--bg-glass); border:1px solid var(--border); border-radius:var(--radius); padding:0.25rem 0.5rem; }
+        .zoom-btn { background:none; border:none; color:var(--text-primary); cursor:pointer; font-size:1rem; padding:0 0.25rem; line-height:1; }
+        .zoom-label { font-size:0.78rem; color:var(--text-secondary); min-width:3rem; text-align:center; }
+        .btn-apply { padding:0.55rem 1.2rem; background:var(--green); color:#fff; border:none; border-radius:var(--radius); font-weight:700; cursor:pointer; font-size:0.85rem; }
+        .btn-apply:disabled { opacity:0.4; cursor:not-allowed; }
+        .btn-cancel-c { padding:0.55rem 1rem; background:var(--bg-glass); border:1px solid var(--border); color:var(--text-primary); border-radius:var(--radius); cursor:pointer; font-size:0.85rem; }
+        .crop-hint { font-size:0.75rem; color:var(--text-muted); }
+        .crop-body { flex:1; overflow:auto; display:flex; align-items:center; justify-content:center; padding:1rem; background:#111; position:relative; }
+        #cropCanvas { cursor:crosshair; display:block; }
+        .crop-footer { padding:0.6rem 1.25rem; background:var(--bg-secondary); border-top:1px solid var(--border); display:flex; align-items:center; gap:1rem; }
+        #previewCanvas { border:1px solid var(--border); border-radius:4px; background:#fff; height:60px; width:auto; }
+        .crop-coords { font-size:0.75rem; color:var(--text-muted); font-family:monospace; }
+        .crop-keys { font-size:0.72rem; color:var(--text-muted); margin-left:auto; }
+    </style>
+</head>
+<body>
+    <div class="progress-bar"><div class="progress-fill" id="progressFill" style="width:0%"></div></div>
+
+    <div class="rev-header">
+        <div style="flex:1">
+            <div class="rev-title" id="revTitle" title="Click to rename">Loading…</div>
+            <div class="rev-meta" id="revMeta"></div>
+        </div>
+        <a href="/" style="font-size:0.82rem;color:var(--text-muted);text-decoration:none">← Home</a>
+    </div>
+
+    <div class="filter-bar">
+        <button class="filter-btn active" onclick="setFilter('all')">All</button>
+        <button class="filter-btn" onclick="setFilter('diagram')">Has Diagram</button>
+        <button class="filter-btn" onclick="setFilter('no-diagram')">No Diagram</button>
+        <button class="filter-btn" onclick="setFilter('unconfirmed')">Unconfirmed</button>
+        <span class="filter-count" id="filterCount"></span>
+    </div>
+
+    <div class="q-list" id="qList"></div>
+
+    <div class="finalize-bar">
+        <span style="font-size:0.85rem;color:var(--text-secondary)" id="confirmCount">0 confirmed</span>
+        <button class="btn-finalize" id="finalizeBtn" onclick="finalizeTest()">🚀 Create Test →</button>
+    </div>
+
+    <!-- Crop Overlay -->
+    <div class="crop-overlay" id="cropOverlay">
+        <div class="crop-toolbar">
+            <h2 id="cropTitle">Crop — Q?</h2>
+            <span class="crop-hint">Drag to select · Arrow keys nudge · Scroll to zoom</span>
+            <div class="zoom-controls">
+                <button class="zoom-btn" onclick="setZoom(zoom - 0.25)">−</button>
+                <span class="zoom-label" id="zoomLabel">100%</span>
+                <button class="zoom-btn" onclick="setZoom(zoom + 0.25)">+</button>
+                <button class="zoom-btn" onclick="setZoom(1)" title="Reset">↺</button>
+            </div>
+            <button class="btn-cancel-c" onclick="closeCrop()">✕ Cancel</button>
+            <button class="btn-apply" id="applyBtn" disabled onclick="applyCrop()">✓ Apply</button>
+        </div>
+        <div class="crop-body" id="cropBody">
+            <canvas id="cropCanvas"></canvas>
+        </div>
+        <div class="crop-footer">
+            <canvas id="previewCanvas" width="120" height="60"></canvas>
+            <span class="crop-coords" id="cropCoords">No selection</span>
+            <span class="crop-keys">Arrow keys: nudge 1px · Shift+Arrow: nudge 10px</span>
+        </div>
+    </div>
+
+<script>
+const TEST_ID = "{{ test_id }}";
+let reviewData = null;
+let confirmed = {};
+let filterMode = 'all';
+
+// ── Crop state ──────────────────────────────────────────────────────────
+let cropQ = null;        // current question
+let pageImg = null;      // Image element
+let zoom = 1;
+let sel = null;          // {x1,y1,x2,y2} in image coords
+let dragMode = null;     // 'new'|'move'|'tl'|'tr'|'bl'|'br'|'t'|'b'|'l'|'r'
+let dragStart = null;
+let selSnap = null;      // snapshot of sel at drag start
+const HANDLE_R = 6;      // handle radius in canvas px
+
+// ── Load ────────────────────────────────────────────────────────────────
+async function load() {
+    const res = await fetch(`/api/review/${TEST_ID}`);
+    reviewData = await res.json();
+    // Setup rename
+    const title = document.getElementById('revTitle');
+    title.textContent = reviewData.test_name;
+    title.onclick = () => startRename(title);
+    renderList();
+}
+
+function startRename(el) {
+    el.contentEditable = 'true'; el.focus();
+    const r = document.createRange(); r.selectNodeContents(el);
+    window.getSelection().removeAllRanges(); window.getSelection().addRange(r);
+    const save = async () => {
+        el.contentEditable = 'false';
+        const name = el.textContent.trim() || reviewData.test_name;
+        el.textContent = name;
+        await fetch(`/api/test/${TEST_ID}`, { method:'PATCH', headers:{'Content-Type':'application/json'}, body: JSON.stringify({name}) });
+        reviewData.test_name = name;
+    };
+    el.onblur = save;
+    el.onkeydown = e => { if(e.key==='Enter'){e.preventDefault();el.blur();} };
+}
+
+// ── Filter ──────────────────────────────────────────────────────────────
+function setFilter(f) {
+    filterMode = f;
+    document.querySelectorAll('.filter-btn').forEach((b,i) => b.classList.toggle('active', ['all','diagram','no-diagram','unconfirmed'][i]===f));
+    renderList();
+}
+
+function filtered() {
+    if (!reviewData) return [];
+    return reviewData.questions.filter(q => {
+        if (filterMode === 'diagram')    return q.has_diagram || q.diagram_crop;
+        if (filterMode === 'no-diagram') return !q.has_diagram && !q.diagram_crop;
+        if (filterMode === 'unconfirmed') return !confirmed[q.id];
+        return true;
+    });
+}
+
+// ── Render ──────────────────────────────────────────────────────────────
+function renderList() {
+    const qs = filtered();
+    document.getElementById('filterCount').textContent = `${qs.length} questions`;
+    const total = reviewData ? reviewData.questions.length : 0;
+    const nConf = Object.keys(confirmed).length;
+    document.getElementById('confirmCount').textContent = `${nConf} / ${total} confirmed`;
+    document.getElementById('progressFill').style.width = total ? `${nConf/total*100}%` : '0%';
+    document.getElementById('finalizeBtn').disabled = false; // always allow
+
+    const list = document.getElementById('qList');
+    list.innerHTML = qs.map(q => {
+        const hasCrop = !!q.diagram_crop;
+        const ok = !!confirmed[q.id];
+        return `<div class="q-row ${ok?'confirmed':''}" id="qrow-${q.id}">
+            <div class="q-num">Q${q.id}</div>
+            <div class="q-body">
+                <div class="q-badges">
+                    ${q.subject ? `<span class="badge badge-subj">${q.subject}</span>` : ''}
+                    ${hasCrop ? `<span class="badge badge-has">📐 Has Diagram</span>` : `<span class="badge badge-no">No Diagram</span>`}
+                    ${ok ? `<span class="badge badge-ok">✓ Confirmed</span>` : ''}
+                </div>
+                <div class="q-text">${q.text}</div>
+                <div class="q-actions">
+                    <button class="btn-xs" onclick="openCrop(${q.id})">✂️ ${hasCrop ? 'Re-crop' : 'Add Diagram'}</button>
+                    ${hasCrop ? `<button class="btn-xs danger" onclick="removeDiagram(${q.id})">🗑 Remove Diagram</button>` : ''}
+                    <button class="btn-xs success ${ok?'active':''}" onclick="toggleConfirm(${q.id})">${ok ? '✓ Confirmed' : 'Confirm ✓'}</button>
+                </div>
+            </div>
+            ${hasCrop ? `<img class="q-thumb" src="/static/test_images/${TEST_ID}/${q.diagram_crop}?v=${Date.now()}" onclick="openCrop(${q.id})" title="Click to re-crop">` : ''}
+        </div>`;
+    }).join('') || `<div style="text-align:center;padding:3rem;color:var(--text-muted)">No questions match this filter</div>`;
+}
+
+function toggleConfirm(qId) {
+    if (confirmed[qId]) delete confirmed[qId]; else confirmed[qId] = true;
+    renderList();
+}
+
+async function removeDiagram(qId) {
+    if (!confirm('Remove diagram from this question?')) return;
+    await fetch(`/api/crop/${TEST_ID}/${qId}`, { method:'DELETE' });
+    const q = reviewData.questions.find(q => q.id === qId);
+    if (q) { q.diagram_crop = null; q.has_diagram = false; }
+    renderList();
+}
+
+async function finalizeTest() {
+    document.getElementById('finalizeBtn').textContent = 'Creating…';
+    document.getElementById('finalizeBtn').disabled = true;
+    const res = await fetch(`/api/finalize/${TEST_ID}`, { method:'POST' });
+    const d = await res.json();
+    if (d.success) window.location.href = d.test_url;
+    else { alert(d.error); document.getElementById('finalizeBtn').textContent = '🚀 Create Test →'; document.getElementById('finalizeBtn').disabled = false; }
+}
+
+// ── Crop Tool ───────────────────────────────────────────────────────────
+function openCrop(qId) {
+    cropQ = reviewData.questions.find(q => q.id === qId);
+    if (!cropQ) return;
+    sel = null;
+    document.getElementById('cropTitle').textContent = `Crop Diagram — Q${qId}`;
+    document.getElementById('applyBtn').disabled = true;
+    document.getElementById('cropCoords').textContent = 'Drag to select region';
+    document.getElementById('cropOverlay').classList.add('active');
+
+    pageImg = new Image();
+    pageImg.onload = () => { zoom = 1; drawCrop(); };
+    pageImg.src = `/static/test_images/${TEST_ID}/${cropQ.page_image}`;
+}
+
+function closeCrop() {
+    document.getElementById('cropOverlay').classList.remove('active');
+    cropQ = null; sel = null;
+}
+
+function setZoom(z) {
+    zoom = Math.max(0.25, Math.min(4, z));
+    document.getElementById('zoomLabel').textContent = Math.round(zoom*100)+'%';
+    drawCrop();
+}
+
+function drawCrop() {
+    if (!pageImg) return;
+    const canvas = document.getElementById('cropCanvas');
+    const W = Math.round(pageImg.width * zoom);
+    const H = Math.round(pageImg.height * zoom);
+    canvas.width = W; canvas.height = H;
+    const ctx = canvas.getContext('2d');
+    ctx.drawImage(pageImg, 0, 0, W, H);
+
+    if (sel) {
+        const {x1,y1,x2,y2} = selToCanvas();
+        const sw = x2-x1, sh = y2-y1;
+        // dim outside
+        ctx.fillStyle = 'rgba(0,0,0,0.5)';
+        ctx.fillRect(0,0,W,H);
+        ctx.clearRect(x1,y1,sw,sh);
+        ctx.drawImage(pageImg, sel.x1, sel.y1, sel.x2-sel.x1, sel.y2-sel.y1, x1, y1, sw, sh);
+        // border
+        ctx.strokeStyle='#6366f1'; ctx.lineWidth=2; ctx.strokeRect(x1,y1,sw,sh);
+        // dashed rule-of-thirds
+        ctx.strokeStyle='rgba(255,255,255,0.25)'; ctx.lineWidth=1; ctx.setLineDash([4,4]);
+        ctx.strokeRect(x1+sw/3,y1,sw/3,sh); ctx.strokeRect(x1,y1+sh/3,sw,sh/3);
+        ctx.setLineDash([]);
+        // handles
+        drawHandles(ctx,x1,y1,x2,y2);
+        // update coords
+        const W_=Math.round(sel.x2-sel.x1), H_=Math.round(sel.y2-sel.y1);
+        document.getElementById('cropCoords').textContent = `${W_}×${H_}px  at (${Math.round(sel.x1)},${Math.round(sel.y1)})`;
+        updatePreview();
+        document.getElementById('applyBtn').disabled = (W_<5||H_<5);
+    }
+}
+
+function drawHandles(ctx,x1,y1,x2,y2) {
+    const mx=(x1+x2)/2, my=(y1+y2)/2;
+    const pts = [[x1,y1],[x2,y1],[x1,y2],[x2,y2],[mx,y1],[mx,y2],[x1,my],[x2,my]];
+    ctx.fillStyle='#fff'; ctx.strokeStyle='#6366f1'; ctx.lineWidth=2;
+    for(const [hx,hy] of pts){ ctx.beginPath(); ctx.arc(hx,hy,HANDLE_R,0,Math.PI*2); ctx.fill(); ctx.stroke(); }
+}
+
+function updatePreview() {
+    if (!sel || !pageImg) return;
+    const prev = document.getElementById('previewCanvas');
+    const pw = 120, ph = 60;
+    const sw = sel.x2-sel.x1, sh = sel.y2-sel.y1;
+    const s = Math.min(pw/sw, ph/sh);
+    prev.width = sw*s; prev.height = sh*s;
+    prev.getContext('2d').drawImage(pageImg, sel.x1, sel.y1, sw, sh, 0, 0, prev.width, prev.height);
+}
+
+// convert sel (image coords) → canvas coords
+function selToCanvas() {
+    return { x1:sel.x1*zoom, y1:sel.y1*zoom, x2:sel.x2*zoom, y2:sel.y2*zoom };
+}
+function canvasToImg(cx,cy) { return { x:cx/zoom, y:cy/zoom }; }
+function getCanvasXY(e) {
+    const r = document.getElementById('cropCanvas').getBoundingClientRect();
+    const cx = (e.clientX??e.touches?.[0].clientX) - r.left;
+    const cy = (e.clientY??e.touches?.[0].clientY) - r.top;
+    return {cx,cy};
+}
+
+function hitHandle(cx,cy) {
+    if (!sel) return null;
+    const {x1,y1,x2,y2} = selToCanvas();
+    const mx=(x1+x2)/2, my=(y1+y2)/2;
+    const handles = {tl:[x1,y1],tr:[x2,y1],bl:[x1,y2],br:[x2,y2],t:[mx,y1],b:[mx,y2],l:[x1,my],r:[x2,my]};
+    for (const [k,[hx,hy]] of Object.entries(handles)) {
+        if (Math.hypot(cx-hx,cy-hy) <= HANDLE_R+3) return k;
+    }
+    // inside selection → move
+    if (cx>=x1&&cx<=x2&&cy>=y1&&cy<=y2) return 'move';
+    return null;
+}
+
+function onMouseDown(e) {
+    e.preventDefault();
+    const {cx,cy} = getCanvasXY(e);
+    const hit = hitHandle(cx,cy);
+    dragStart = {cx,cy};
+    selSnap = sel ? {...sel} : null;
+    if (hit) { dragMode = hit; }
+    else { dragMode = 'new'; const p=canvasToImg(cx,cy); sel={x1:p.x,y1:p.y,x2:p.x,y2:p.y}; }
+}
+
+function onMouseMove(e) {
+    if (!dragMode) return;
+    e.preventDefault();
+    const {cx,cy} = getCanvasXY(e);
+    const dx=(cx-dragStart.cx)/zoom, dy=(cy-dragStart.cy)/zoom;
+    const p=canvasToImg(cx,cy);
+
+    if (dragMode==='new') { sel={x1:selSnap?selSnap.x1:p.x, y1:selSnap?selSnap.y1:p.y, x2:p.x, y2:p.y}; }
+    else if (dragMode==='move') { const sw=selSnap.x2-selSnap.x1, sh=selSnap.y2-selSnap.y1; sel={x1:selSnap.x1+dx,y1:selSnap.y1+dy,x2:selSnap.x1+dx+sw,y2:selSnap.y1+dy+sh}; }
+    else {
+        sel = {...selSnap};
+        if (dragMode.includes('l')) sel.x1=selSnap.x1+dx;
+        if (dragMode.includes('r')) sel.x2=selSnap.x2+dx;
+        if (dragMode.includes('t')) sel.y1=selSnap.y1+dy;
+        if (dragMode.includes('b')) sel.y2=selSnap.y2+dy;
+    }
+    // clamp to image
+    const W=pageImg.width, H=pageImg.height;
+    sel.x1=Math.max(0,Math.min(W,sel.x1)); sel.x2=Math.max(0,Math.min(W,sel.x2));
+    sel.y1=Math.max(0,Math.min(H,sel.y1)); sel.y2=Math.max(0,Math.min(H,sel.y2));
+    drawCrop();
+}
+
+function onMouseUp(e) { dragMode=null; selSnap=null; }
+
+function onKeyDown(e) {
+    if (!document.getElementById('cropOverlay').classList.contains('active')) return;
+    if (!sel) return;
+    const step = e.shiftKey ? 10 : 1;
+    const norm = normSel();
+    if (e.key==='ArrowLeft')  { norm.x1-=step; norm.x2-=step; }
+    if (e.key==='ArrowRight') { norm.x1+=step; norm.x2+=step; }
+    if (e.key==='ArrowUp')    { norm.y1-=step; norm.y2-=step; }
+    if (e.key==='ArrowDown')  { norm.y1+=step; norm.y2+=step; }
+    if (['ArrowLeft','ArrowRight','ArrowUp','ArrowDown'].includes(e.key)) {
+        e.preventDefault(); sel=norm; drawCrop();
+    }
+}
+
+function onWheel(e) {
+    e.preventDefault();
+    setZoom(zoom + (e.deltaY < 0 ? 0.15 : -0.15));
+}
+
+function normSel() {
+    return { x1:Math.min(sel.x1,sel.x2), y1:Math.min(sel.y1,sel.y2), x2:Math.max(sel.x1,sel.x2), y2:Math.max(sel.y1,sel.y2) };
+}
+
+async function applyCrop() {
+    const n = normSel();
+    document.getElementById('applyBtn').textContent='Saving…'; document.getElementById('applyBtn').disabled=true;
+    const res = await fetch(`/api/crop/${TEST_ID}/${cropQ.id}`, {
+        method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({x1:Math.round(n.x1),y1:Math.round(n.y1),x2:Math.round(n.x2),y2:Math.round(n.y2),page_number:cropQ.page_number})
+    });
+    const data = await res.json();
+    document.getElementById('applyBtn').textContent='✓ Apply'; document.getElementById('applyBtn').disabled=false;
+    if (data.success) {
+        cropQ.diagram_crop = data.diagram_crop; cropQ.has_diagram = true;
+        const q = reviewData.questions.find(q=>q.id===cropQ.id);
+        if (q) { q.diagram_crop=data.diagram_crop; q.has_diagram=true; }
+        closeCrop(); renderList();
+    } else { alert('Error: '+data.error); }
+}
+
+// bind events
+const canvas = document.getElementById('cropCanvas');
+canvas.addEventListener('mousedown', onMouseDown);
+canvas.addEventListener('mousemove', onMouseMove);
+canvas.addEventListener('mouseup', onMouseUp);
+canvas.addEventListener('touchstart', onMouseDown, {passive:false});
+canvas.addEventListener('touchmove', onMouseMove, {passive:false});
+canvas.addEventListener('touchend', onMouseUp);
+canvas.addEventListener('wheel', onWheel, {passive:false});
+document.addEventListener('keydown', onKeyDown);
+
+// cursor
+canvas.addEventListener('mousemove', e => {
+    if (dragMode) return;
+    const {cx,cy}=getCanvasXY(e);
+    const hit=hitHandle(cx,cy);
+    const cursors={tl:'nwse-resize',br:'nwse-resize',tr:'nesw-resize',bl:'nesw-resize',t:'ns-resize',b:'ns-resize',l:'ew-resize',r:'ew-resize',move:'move'};
+    canvas.style.cursor = hit ? (cursors[hit]||'crosshair') : 'crosshair';
+});
+
+load();
+</script>
+</body>
+</html>

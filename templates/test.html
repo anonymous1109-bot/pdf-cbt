@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CBT — Test in Progress</title>
+    <link rel="stylesheet" href="/static/style.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js"></script>
+</head>
+<body>
+    <div class="cbt" id="cbtApp">
+        <div class="cbt-header">
+            <div class="cbt-title" id="testName">Loading...</div>
+            <div class="cbt-timer" id="timer">00:00:00</div>
+        </div>
+        <div class="subject-tabs" id="subjectTabs"></div>
+        <div class="cbt-body">
+            <div class="question-panel" id="questionPanel"></div>
+            <div class="nav-panel">
+                <div class="nav-title">Question Navigation</div>
+                <div class="nav-grid" id="navGrid"></div>
+                <div class="nav-legend">
+                    <div class="legend-item"><div class="legend-dot" style="background:var(--green)"></div> Answered</div>
+                    <div class="legend-item"><div class="legend-dot" style="background:var(--red)"></div> Not Answered</div>
+                    <div class="legend-item"><div class="legend-dot" style="background:var(--purple)"></div> Marked for Review</div>
+                    <div class="legend-item"><div class="legend-dot" style="background:rgba(255,255,255,0.1);border:1px solid var(--border)"></div> Not Visited</div>
+                </div>
+                <button class="btn-submit-test" id="submitTestBtn">📤 Submit Test</button>
+            </div>
+        </div>
+    </div>
+
+    <div class="modal-overlay" id="submitModal">
+        <div class="modal">
+            <h3>⚠️ Submit Test?</h3>
+            <div class="modal-stats" id="modalStats"></div>
+            <p style="color:var(--text-muted);font-size:0.85rem;margin-bottom:1rem;">This action cannot be undone.</p>
+            <div class="modal-actions">
+                <button class="btn btn-sm btn-outline" id="cancelSubmit">Go Back</button>
+                <button class="btn btn-sm btn-danger" id="confirmSubmit">Submit Now</button>
+            </div>
+        </div>
+    </div>
+
+    <div class="processing" id="submitting">
+        <div class="spinner"></div>
+        <div class="processing-text">Grading your test...</div>
+        <div class="processing-sub">AI is analyzing your concept gaps</div>
+    </div>
+
+    <script src="/static/app.js"></script>
+    <script>
+        const TEST_ID = "{{ test_id }}";
+        initCBT(TEST_ID);
+    </script>
+</body>
+</html>

@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Mistakes Bank — PDF to CBT</title>
+    <link rel="stylesheet" href="/static/style.css">
+    <script src="https://cdn.jsdelivr.net/npm/katex@0.16.8/dist/katex.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/katex@0.16.8/dist/contrib/auto-render.min.js"></script>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.8/dist/katex.min.css">
+    <style>
+        .mistake-card { background: var(--bg-glass); border: 1px solid var(--border); border-radius: var(--radius); padding: 1.5rem; margin-bottom: 1rem; }
+        .mistake-header { display: flex; justify-content: space-between; font-size: 0.8rem; color: var(--text-muted); margin-bottom: 1rem; padding-bottom: 0.5rem; border-bottom: 1px solid var(--border); }
+        .mistake-ans { margin-top: 1rem; display: flex; gap: 1rem; }
+        .ans-box { padding: 0.5rem 1rem; border-radius: 4px; font-weight: bold; font-size: 0.9rem; }
+        .ans-wrong { background: rgba(239,68,68,0.1); color: var(--red); border: 1px solid rgba(239,68,68,0.2); }
+        .ans-correct { background: rgba(34,197,94,0.1); color: var(--green); border: 1px solid rgba(34,197,94,0.2); }
+        .subject-group { margin-top: 2rem; border-left: 4px solid var(--accent); padding-left: 1rem; }
+        .topic-group { margin-top: 1.5rem; margin-left: 1rem; }
+    </style>
+</head>
+<body>
+    <div class="test-container" style="max-width: 900px; padding: 2rem;">
+        <a href="/" class="back-home">← Back to Dashboard</a>
+        <h1 style="margin-bottom: 0.5rem;">❌ Mistakes Bank</h1>
+        <p style="color: var(--text-muted); margin-bottom: 2rem;">Review your incorrect and unattempted questions across all tests.</p>
+
+        <div id="loading" class="processing active" style="position:static; margin:2rem 0; min-height:100px;">
+            <div class="spinner"></div>
+            <div class="processing-text">Loading mistakes...</div>
+        </div>
+
+        <div id="mistakesContainer"></div>
+    </div>
+
+    <script>
+        async function loadMistakes() {
+            try {
+                const res = await fetch('/api/mistakes');
+                const mistakes = await res.json();
+                
+                document.getElementById('loading').style.display = 'none';
+                
+                if (!mistakes || mistakes.length === 0) {
+                    document.getElementById('mistakesContainer').innerHTML = 
+                        '<div class="mistake-card" style="text-align:center">No mistakes yet! Keep up the good work.</div>';
+                    return;
+                }
+
+                // Group by Status -> Subject -> Topic
+                const grouped = {
+                    'incorrect': {},
+                    'unattempted': {}
+                };
+                
+                mistakes.forEach(m => {
+                    const status = m.status === 'unattempted' ? 'unattempted' : 'incorrect';
+                    const subj = m.subject || 'General';
+                    const topic = m.topic || 'Uncategorized';
+                    if (!grouped[status][subj]) grouped[status][subj] = {};
+                    if (!grouped[status][subj][topic]) grouped[status][subj][topic] = [];
+                    grouped[status][subj][topic].push(m);
+                });
+
+                let html = '';
+                const statusTitles = {
+                    'incorrect': '❌ Incorrect Answers',
+                    'unattempted': '⚠️ Unattempted Questions'
+                };
+                const statusColors = {
+                    'incorrect': 'var(--red)',
+                    'unattempted': 'var(--orange)'
+                };
+
+                for (const status of ['incorrect', 'unattempted']) {
+                    const subjects = grouped[status];
+                    if (Object.keys(subjects).length === 0) continue;
+
+                    html += `<h2 style="color:${statusColors[status]}; border-bottom: 2px solid ${statusColors[status]}; padding-bottom: 0.5rem; margin-top: 2rem;">${statusTitles[status]}</h2>`;
+
+                    for (const [subj, topics] of Object.entries(subjects)) {
+                        const subjId = `subj-${Math.random().toString(36).substr(2,9)}`;
+                        html += `
+                        <div class="subject-group">
+                            <h3 style="margin:0; color:var(--text); cursor:pointer; display:flex; align-items:center; gap:0.5rem; user-select:none;" onclick="const el = document.getElementById('${subjId}'); el.style.display = el.style.display === 'none' ? 'block' : 'none'; this.querySelector('.arrow').style.transform = el.style.display === 'none' ? 'rotate(-90deg)' : 'rotate(0deg)';">
+                                <span class="arrow" style="font-size:0.8em; color:var(--text-muted); transition:transform 0.2s;">▼</span> ${subj}
+                            </h3>
+                            <div id="${subjId}" style="display:block;">
+                        `;
+                        
+                        for (const [topic, qs] of Object.entries(topics)) {
+                            const topicId = `topic-${Math.random().toString(36).substr(2,9)}`;
+                            html += `
+                            <div class="topic-group">
+                                <h4 style="margin:0 0 1rem 0; color:var(--accent); cursor:pointer; display:flex; align-items:center; gap:0.5rem; user-select:none;" onclick="const el = document.getElementById('${topicId}'); el.style.display = el.style.display === 'none' ? 'block' : 'none'; this.querySelector('.arrow').style.transform = el.style.display === 'none' ? 'rotate(-90deg)' : 'rotate(0deg)';">
+                                    <span class="arrow" style="font-size:0.8em; transition:transform 0.2s;">▼</span> ${topic} <span style="font-size:0.8em; font-weight:normal; color:var(--text-muted); margin-left:auto;">${qs.length} mistakes</span>
+                                </h4>
+                                <div id="${topicId}" style="display:none;">
+                            `;
+                            
+                            qs.forEach(q => {
+                                const diagramHtml = q.diagram_crop ? `<img src="/static/test_images/${q.test_id}/${q.diagram_crop}" style="max-width:100%; max-height:200px; border:1px solid var(--border); border-radius:4px; margin-bottom:1rem; display:block; background:#fff;">` : '';
+                                html += `
+                                <div class="mistake-card">
+                                    <div class="mistake-header">
+                                        <span>From: ${q.test_name}</span>
+                                        <span>Type: ${(q.type || 'MCQ').replace('_', ' ')}</span>
+                                    </div>
+                                    ${diagramHtml}
+                                    <div class="q-text">${q.text}</div>
+                                    <div class="mistake-ans">
+                                        <div class="ans-box ${status === 'incorrect' ? 'ans-wrong' : ''}" style="${status === 'unattempted' ? 'background:rgba(245,158,11,0.1); color:var(--orange); border: 1px solid rgba(245,158,11,0.2);' : ''}">Your Answer: ${q.user_answer || 'None'}</div>
+                                        <div class="ans-box ans-correct">Correct Answer: ${q.correct_answer}</div>
+                                    </div>
+                                </div>`;
+                            });
+                            html += `</div></div>`;
+                        }
+                        html += `</div></div>`;
+                    }
+                }
+                
+                document.getElementById('mistakesContainer').innerHTML = html;
+                renderMathInElement(document.body, {
+                    delimiters: [
+                        { left: '$$', right: '$$', display: true },
+                        { left: '$', right: '$', display: false },
+                        { left: '\\(', right: '\\)', display: false },
+                        { left: '\\[', right: '\\]', display: true }
+                    ],
+                    throwOnError: false
+                });
+
+            } catch (err) {
+                console.error(err);
+                document.getElementById('loading').innerHTML = '<div style="color:var(--red)">Failed to load mistakes.</div>';
+            }
+        }
+
+        window.onload = loadMistakes;
+    </script>
+</body>
+</html>

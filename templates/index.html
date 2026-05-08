@@ -1,0 +1,388 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PDF to CBT Converter — AI Powered</title>
+    <meta name="description" content="Convert question paper PDFs into interactive Computer-Based Tests with AI-powered concept analysis">
+    <link rel="stylesheet" href="/static/style.css">
+    <style>
+        /* ── Tab navigation ── */
+        .tab-nav { display:flex; gap:0.5rem; border-bottom:1px solid var(--border); margin-bottom:2rem; }
+        .tab-btn { padding:0.65rem 1.4rem; background:none; border:none; border-bottom:2px solid transparent;
+                   color:var(--text-secondary); font-size:0.95rem; font-weight:600; cursor:pointer; transition:all 0.2s;
+                   margin-bottom:-1px; font-family:inherit; }
+        .tab-btn:hover { color:var(--text-primary); }
+        .tab-btn.active { color:var(--accent); border-bottom-color:var(--accent); }
+        .tab-pane { display:none; }
+        .tab-pane.active { display:block; }
+
+        /* ── Test cards ── */
+        .tests-grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(300px, 1fr)); gap:1rem; }
+        .test-card { background:var(--bg-card); border:1px solid var(--border); border-radius:var(--radius);
+                     padding:1.25rem; transition:border-color 0.2s; position:relative; }
+        .test-card:hover { border-color:rgba(99,102,241,0.4); }
+        .test-card-name { font-weight:700; font-size:1rem; margin-bottom:0.4rem; }
+        .test-card-meta { font-size:0.8rem; color:var(--text-muted); display:flex; flex-direction:column; gap:0.2rem; margin-bottom:1rem; }
+        .test-card-badge { display:inline-block; padding:0.2rem 0.6rem; border-radius:999px; font-size:0.72rem; font-weight:700; }
+        .badge-draft { background:rgba(245,158,11,0.15); color:#f59e0b; }
+        .badge-ready { background:rgba(34,197,94,0.12); color:#22c55e; }
+        .test-card-actions { display:flex; gap:0.5rem; }
+        .btn-take { flex:1; padding:0.55rem; background:var(--accent); color:#fff; border:none;
+                    border-radius:calc(var(--radius) - 2px); cursor:pointer; font-weight:600; font-size:0.85rem; transition:opacity 0.2s; }
+        .btn-take:hover { opacity:0.85; }
+        .btn-review-link { flex:1; padding:0.55rem; background:rgba(245,158,11,0.12); color:#f59e0b;
+                           border:1px solid rgba(245,158,11,0.3); border-radius:calc(var(--radius) - 2px);
+                           cursor:pointer; font-weight:600; font-size:0.85rem; text-align:center; }
+        .btn-del { padding:0.55rem 0.8rem; background:rgba(239,68,68,0.12); color:var(--red);
+                   border:1px solid rgba(239,68,68,0.2); border-radius:calc(var(--radius) - 2px);
+                   cursor:pointer; font-size:0.85rem; transition:all 0.2s; }
+        .btn-del:hover { background:var(--red); color:#fff; }
+
+        /* ── Attempt cards ── */
+        .attempt-card { background:var(--bg-card); border:1px solid var(--border); border-radius:var(--radius);
+                        padding:1rem 1.25rem; display:flex; align-items:center; gap:1rem; margin-bottom:0.75rem; transition:border-color 0.2s; }
+        .attempt-card:hover { border-color:rgba(99,102,241,0.3); }
+        .attempt-score { width:52px; height:52px; border-radius:50%; background:var(--bg-glass);
+                         border:2px solid var(--border); display:flex; flex-direction:column; align-items:center;
+                         justify-content:center; flex-shrink:0; }
+        .attempt-score .pct { font-size:0.95rem; font-weight:800; }
+        .attempt-info { flex:1; }
+        .attempt-name { font-weight:600; font-size:0.9rem; margin-bottom:0.2rem; }
+        .attempt-meta { font-size:0.78rem; color:var(--text-muted); }
+
+        /* ── Date group header ── */
+        .date-group-header { font-size:0.75rem; font-weight:700; color:var(--text-muted); text-transform:uppercase;
+                             letter-spacing:0.08em; margin:1.5rem 0 0.75rem; padding-bottom:0.4rem;
+                             border-bottom:1px solid var(--border); }
+
+        .btn-rename { padding:0.55rem 0.7rem; background:rgba(99,102,241,0.1); color:var(--accent);
+                      border:1px solid rgba(99,102,241,0.2); border-radius:calc(var(--radius) - 2px);
+                      cursor:pointer; font-size:0.85rem; transition:all 0.2s; }
+        .btn-rename:hover { background:rgba(99,102,241,0.2); }
+        .test-card-name[contenteditable="true"] { outline:2px solid var(--accent); border-radius:4px;
+                                                   padding:2px 6px; background:var(--bg-glass); }
+    </style>
+</head>
+<body>
+    <div class="landing">
+        <h1 class="landing-title">📝 PDF → CBT Converter</h1>
+        <p class="landing-sub">Upload your question paper &amp; answer key — AI converts it into an interactive test</p>
+
+        <!-- Tab Navigation -->
+        <div class="tab-nav">
+            <button class="tab-btn active" onclick="switchTab('upload')">🚀 Upload</button>
+            <button class="tab-btn" onclick="switchTab('tests')" id="testsTabBtn">📝 My Tests</button>
+            <button class="tab-btn" onclick="switchTab('attempts')">🎯 Attempts</button>
+        </div>
+
+        <!-- Upload Tab -->
+        <div class="tab-pane active" id="tab-upload">
+            <div class="upload-card">
+                <label class="upload-label">Question Paper PDF</label>
+                <div class="drop-zone" id="qDropZone" data-input="questionInput">
+                    <div class="drop-zone-icon">📄</div>
+                    <div class="drop-zone-title">Drop Question Paper here</div>
+                    <div class="drop-zone-hint">or click to browse</div>
+                    <div class="drop-zone-file" id="qFileName"></div>
+                    <input type="file" id="questionInput" accept=".pdf">
+                </div>
+
+                <label class="upload-label">Answer Key PDF</label>
+                <div class="drop-zone" id="aDropZone" data-input="answerInput">
+                    <div class="drop-zone-icon">🔑</div>
+                    <div class="drop-zone-title">Drop Answer Key here</div>
+                    <div class="drop-zone-hint">or click to browse</div>
+                    <div class="drop-zone-file" id="aFileName"></div>
+                    <input type="file" id="answerInput" accept=".pdf">
+                </div>
+
+                <button class="btn btn-primary" id="processBtn" disabled>
+                    🚀 Process &amp; Create Test
+                </button>
+            </div>
+
+            <div style="display:flex; gap:0.75rem; justify-content:center; margin-top:1.5rem; flex-wrap:wrap;">
+                <a href="/mistakes" class="btn btn-sm btn-mark" style="text-decoration:none">❌ Mistakes Bank</a>
+                <button class="btn btn-sm btn-outline" onclick="exportData()">⬇️ Export Data</button>
+                <button class="btn btn-sm btn-outline" onclick="document.getElementById('importInput').click()">⬆️ Import Data</button>
+                <input type="file" id="importInput" style="display:none" accept=".json" onchange="importData(event)">
+            </div>
+        </div>
+
+        <!-- My Tests Tab -->
+        <div class="tab-pane" id="tab-tests">
+            <div id="testsContainer">
+                <div class="empty-state"><div class="emoji">📭</div>Loading tests…</div>
+            </div>
+        </div>
+
+        <!-- Attempts Tab -->
+        <div class="tab-pane" id="tab-attempts">
+            <div id="attemptsContainer">
+                <div class="empty-state"><div class="emoji">📭</div>Loading attempts…</div>
+            </div>
+        </div>
+    </div>
+
+    <div class="processing" id="processing">
+        <div class="spinner"></div>
+        <div class="processing-text">Analyzing your papers with AI...</div>
+        <div class="processing-sub" id="processingStatus">Uploading PDFs to Gemini</div>
+    </div>
+
+    <script>
+        // ─── Tab switching ───────────────────────────────────────────────
+        function switchTab(name) {
+            document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+            document.querySelectorAll('.tab-pane').forEach(p => p.classList.remove('active'));
+            document.querySelector(`[onclick="switchTab('${name}')"]`).classList.add('active');
+            document.getElementById(`tab-${name}`).classList.add('active');
+            if (name === 'tests') renderTests();
+            if (name === 'attempts') renderAttempts();
+        }
+
+        // ─── Dashboard data ──────────────────────────────────────────────
+        let dashData = { tests: [], attempts: [] };
+
+        async function loadDashboard() {
+            try {
+                const res = await fetch('/api/dashboard');
+                dashData = await res.json();
+                // Update tab badge
+                const count = dashData.tests.length;
+                document.getElementById('testsTabBtn').textContent = `📝 My Tests${count ? ` (${count})` : ''}`;
+            } catch(e) { console.error(e); }
+        }
+
+        // ─── Group items by date ─────────────────────────────────────────
+        function groupByDate(items, dateKey) {
+            const groups = {};
+            const today = new Date(); today.setHours(0,0,0,0);
+            const yesterday = new Date(today); yesterday.setDate(today.getDate() - 1);
+
+            for (const item of items) {
+                const d = new Date(item[dateKey]);
+                d.setHours(0,0,0,0);
+                let label;
+                if (d.getTime() === today.getTime()) label = 'Today';
+                else if (d.getTime() === yesterday.getTime()) label = 'Yesterday';
+                else label = d.toLocaleDateString('en-IN', { day:'numeric', month:'long', year:'numeric' });
+                if (!groups[label]) groups[label] = [];
+                groups[label].push(item);
+            }
+            return groups;
+        }
+
+        // ─── Render My Tests ─────────────────────────────────────────────
+        function renderTests() {
+            const container = document.getElementById('testsContainer');
+            const tests = [...dashData.tests].sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+
+            if (tests.length === 0) {
+                container.innerHTML = `<div class="empty-state"><div class="emoji">📭</div>No saved tests yet. Upload a PDF to get started!</div>`;
+                return;
+            }
+
+            const groups = groupByDate(tests, 'created_at');
+            let html = '';
+            for (const [label, items] of Object.entries(groups)) {
+                html += `<div class="date-group-header">${label}</div><div class="tests-grid">`;
+                for (const t of items) {
+                    const isDraft = t.status === 'draft';
+                    const time = new Date(t.created_at).toLocaleTimeString('en-IN', { hour:'2-digit', minute:'2-digit' });
+                    html += `
+                    <div class="test-card" id="card-${t.id}">
+                        <div style="display:flex;align-items:flex-start;gap:0.5rem;margin-bottom:0.4rem">
+                            <div class="test-card-name" style="flex:1">${t.name}</div>
+                            <span class="test-card-badge ${isDraft ? 'badge-draft' : 'badge-ready'}">${isDraft ? 'DRAFT' : 'READY'}</span>
+                        </div>
+                        <div class="test-card-meta">
+                            <span>🕐 ${time} &nbsp;•&nbsp; ${t.total_questions || '?'} questions</span>
+                            <span>🆔 ${t.id}</span>
+                        </div>
+                        <div class="test-card-actions">
+                            ${isDraft
+                                ? `<a class="btn-review-link" href="/review/${t.id}">✂️ Review</a>`
+                                : `<button class="btn-take" onclick="window.location.href='/test/${t.id}'">▶ Take Test</button>`
+                            }
+                            <button class="btn-rename" onclick="renameTest('${t.id}', event)" title="Rename">✏️</button>
+                            <button class="btn-del" onclick="deleteTest('${t.id}', event)" title="Delete">🗑</button>
+                        </div>
+                    </div>`;
+                }
+                html += `</div>`;
+            }
+            container.innerHTML = html;
+        }
+
+        async function deleteTest(testId, e) {
+            e.stopPropagation();
+            if (!confirm('Delete this test and all its data? This cannot be undone.')) return;
+            await fetch(`/api/test/${testId}`, { method: 'DELETE' });
+            dashData.tests = dashData.tests.filter(t => t.id !== testId);
+            const count = dashData.tests.length;
+            document.getElementById('testsTabBtn').textContent = `📝 My Tests${count ? ` (${count})` : ''}`;
+            renderTests();
+        }
+
+        function renameTest(testId, e) {
+            e.stopPropagation();
+            const card = document.getElementById(`card-${testId}`);
+            if (!card) return;
+            const nameEl = card.querySelector('.test-card-name');
+            nameEl.contentEditable = 'true';
+            nameEl.focus();
+            // Select all text
+            const range = document.createRange(); range.selectNodeContents(nameEl);
+            window.getSelection().removeAllRanges(); window.getSelection().addRange(range);
+
+            const save = async () => {
+                nameEl.contentEditable = 'false';
+                const newName = nameEl.textContent.trim();
+                if (!newName) { nameEl.textContent = dashData.tests.find(t=>t.id===testId)?.name || 'Test'; return; }
+                const res = await fetch(`/api/test/${testId}`, {
+                    method: 'PATCH',
+                    headers: {'Content-Type':'application/json'},
+                    body: JSON.stringify({ name: newName })
+                });
+                const data = await res.json();
+                if (data.success) {
+                    const t = dashData.tests.find(t=>t.id===testId);
+                    if (t) t.name = data.name;
+                } else { nameEl.textContent = dashData.tests.find(t=>t.id===testId)?.name || 'Test'; }
+            };
+            nameEl.onblur = save;
+            nameEl.onkeydown = (ev) => { if (ev.key === 'Enter') { ev.preventDefault(); nameEl.blur(); } if (ev.key === 'Escape') { nameEl.contentEditable = 'false'; } };
+        }
+
+        // ─── Render Attempts ─────────────────────────────────────────────
+        function renderAttempts() {
+            const container = document.getElementById('attemptsContainer');
+            const attempts = [...dashData.attempts].sort((a, b) => new Date(b.submitted_at) - new Date(a.submitted_at));
+
+            if (attempts.length === 0) {
+                container.innerHTML = `<div class="empty-state"><div class="emoji">🎯</div>No attempts yet. Take a test to see results here!</div>`;
+                return;
+            }
+
+            const groups = groupByDate(attempts, 'submitted_at');
+            let html = '';
+            for (const [label, items] of Object.entries(groups)) {
+                html += `<div class="date-group-header">${label}</div>`;
+                for (const a of items) {
+                    const pct = a.max_score > 0 ? Math.round((a.score / a.max_score) * 100) : 0;
+                    const color = pct >= 70 ? 'var(--green)' : pct >= 40 ? 'var(--orange)' : 'var(--red)';
+                    const time = new Date(a.submitted_at).toLocaleTimeString('en-IN', { hour:'2-digit', minute:'2-digit' });
+                    html += `
+                    <div class="attempt-card" style="cursor:pointer" onclick="window.location.href='/result/${a.id}'">
+                        <div class="attempt-score" style="border-color:${color}">
+                            <span class="pct" style="color:${color}">${pct}%</span>
+                        </div>
+                        <div class="attempt-info">
+                            <div class="attempt-name">${a.test_name}</div>
+                            <div class="attempt-meta">Score: ${a.score}/${a.max_score} &nbsp;•&nbsp; ${time}</div>
+                        </div>
+                        <button class="btn-del" onclick="deleteAttempt('${a.id}', event)" title="Delete attempt">🗑</button>
+                    </div>`;
+                }
+            }
+            container.innerHTML = html;
+        }
+
+        async function deleteAttempt(id, e) {
+            e.stopPropagation();
+            if (!confirm('Delete this attempt?')) return;
+            await fetch('/api/attempt/' + id, { method: 'DELETE' });
+            dashData.attempts = dashData.attempts.filter(a => a.id !== id);
+            renderAttempts();
+        }
+
+        // ─── Export / Import ─────────────────────────────────────────────
+        function exportData() { window.location.href = '/api/export'; }
+
+        function importData(e) {
+            const file = e.target.files[0];
+            if (!file) return;
+            const reader = new FileReader();
+            reader.onload = async (ev) => {
+                try {
+                    const data = JSON.parse(ev.target.result);
+                    const res = await fetch('/api/import', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(data) });
+                    const result = await res.json();
+                    if (result.success) {
+                        alert(`Imported ${result.tests} tests and ${result.attempts} attempts!`);
+                        await loadDashboard();
+                    } else { alert('Import failed: ' + result.error); }
+                } catch(err) { alert('Invalid JSON file'); }
+            };
+            reader.readAsText(file);
+        }
+
+        // ─── Drag & drop upload ──────────────────────────────────────────
+        const processBtn = document.getElementById('processBtn');
+        const qInput = document.getElementById('questionInput');
+        const aInput = document.getElementById('answerInput');
+
+        document.querySelectorAll('.drop-zone').forEach(zone => {
+            const input = document.getElementById(zone.dataset.input);
+            zone.addEventListener('click', () => input.click());
+            zone.addEventListener('dragover', e => { e.preventDefault(); zone.classList.add('drag-over'); });
+            zone.addEventListener('dragleave', () => zone.classList.remove('drag-over'));
+            zone.addEventListener('drop', e => {
+                e.preventDefault(); zone.classList.remove('drag-over');
+                if (e.dataTransfer.files[0]) { input.files = e.dataTransfer.files; input.dispatchEvent(new Event('change')); }
+            });
+            input.addEventListener('change', () => {
+                if (input.files[0]) {
+                    zone.classList.add('has-file');
+                    zone.querySelector('.drop-zone-file').textContent = '✅ ' + input.files[0].name;
+                    checkReady();
+                }
+            });
+        });
+
+        function checkReady() { processBtn.disabled = !(qInput.files[0] && aInput.files[0]); }
+
+        // ─── Process / upload ────────────────────────────────────────────
+        processBtn.addEventListener('click', async () => {
+            const processing = document.getElementById('processing');
+            const statusEl = document.getElementById('processingStatus');
+            processing.classList.add('active');
+
+            const statuses = ['Uploading PDFs to Gemini...','AI is reading the question paper...','Structuring data natively...','Extracting figures and topics...','Building your test...'];
+            let si = 0;
+            const interval = setInterval(() => { si = Math.min(si + 1, statuses.length - 1); statusEl.textContent = statuses[si]; }, 5000);
+
+            const formData = new FormData();
+            formData.append('question_paper', qInput.files[0]);
+            formData.append('answer_key', aInput.files[0]);
+
+            try {
+                const res = await fetch('/api/process', { method: 'POST', body: formData });
+                const data = await res.json();
+                clearInterval(interval);
+                if (data.success) {
+                    if (data.needs_review) {
+                        statusEl.textContent = `✅ ${data.total_questions} questions extracted! ${data.diagram_count} diagrams need review...`;
+                        setTimeout(() => window.location.href = data.review_url, 1500);
+                    } else {
+                        statusEl.textContent = `✅ ${data.total_questions} questions extracted! Redirecting...`;
+                        setTimeout(() => window.location.href = `/test/${data.test_id}`, 1500);
+                    }
+                } else {
+                    alert('Error: ' + (data.error || 'Unknown error'));
+                    processing.classList.remove('active');
+                }
+            } catch (err) {
+                clearInterval(interval);
+                alert('Network error: ' + err.message);
+                processing.classList.remove('active');
+            }
+        });
+
+        // ─── Init ────────────────────────────────────────────────────────
+        loadDashboard();
+    </script>
+</body>
+</html>

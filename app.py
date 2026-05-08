@@ -1,0 +1,788 @@
+"""
+PDF to CBT Converter — Flask Backend
+Features: 4-key rotation, 5s delay, diagram extraction via PyMuPDF, integer questions
+"""
+import os, json, uuid, re, time, traceback, threading
+from datetime import datetime
+from flask import Flask, render_template, request, jsonify, redirect, url_for
+from google import genai
+from google.genai import types
+from pydantic import BaseModel
+from typing import List, Dict, Optional, Any
+import fitz  # PyMuPDF
+import database
+
+# ======================================================================
+# API KEY ROTATION — Round-robin with auto-failover
+# ======================================================================
+API_KEYS = [k for k in [
+    os.environ.get("GEMINI_KEY_1"),
+    os.environ.get("GEMINI_KEY_2"),
+    os.environ.get("GEMINI_KEY_3"),
+    os.environ.get("GEMINI_KEY_4"),
+] if k]
+
+if not API_KEYS:
+    print("[Boot] WARNING: No GEMINI_KEY environment variables found! Using local fallback keys.")
+    API_KEYS = [
+        "AIzaSyB5xiHurVEdsP0gg-UvPZJfOBKSZ5NJSjY",
+        "AIzaSyDfkDecKODMKN8GW-YnxwkfL28HX3UdqdY",
+        "AIzaSyDzwQOwNiY-FpYHzVT1ZxWRVK7pnfx4iyQ",
+        "AIzaSyBAT7dFHjwyf6CgPtD2FK7wxqcs_OPsI5A",
+    ]
+
+_key_index = 0
+_key_lock = threading.Lock()
+_last_request_time = 0
+REQUEST_DELAY = 5  # seconds between Gemini requests
+
+
+def _get_client():
+    """Get a Gemini client with the current key (round-robin)."""
+    global _key_index
+    with _key_lock:
+        key = API_KEYS[_key_index]
+        _key_index = (_key_index + 1) % len(API_KEYS)
+    print(f"[KeyRotation] Using key ...{key[-8:]}")
+    return genai.Client(api_key=key)
+
+
+def _rate_limit_wait():
+    """Enforce minimum delay between Gemini requests."""
+    global _last_request_time
+    now = time.time()
+    elapsed = now - _last_request_time
+    if elapsed < REQUEST_DELAY:
+        wait = REQUEST_DELAY - elapsed
+        print(f"[RateLimit] Waiting {wait:.1f}s before next request")
+        time.sleep(wait)
+    _last_request_time = time.time()
+
+
+def _call_gemini(contents, max_retries=8, client=None):
+    """Call Gemini with key rotation + retry on 429."""
+    keys_tried = 0
+    for attempt in range(max_retries):
+        _rate_limit_wait()
+        current_client = client if client else _get_client()
+        try:
+            response = current_client.models.generate_content(
+                model="gemini-2.5-flash",
+                contents=contents
+            )
+            return response.text
+        except Exception as e:
+            err = str(e)
+            if any(x in err for x in ['429', 'RESOURCE_EXHAUSTED', '503', 'UNAVAILABLE']):
+                if client:
+                    print(f"[Gemini] Error on fixed client: {err[:80]}... triggering full rotation")
+                    raise Exception(f"FIXED_CLIENT_EXHAUSTED: {err}")
+                keys_tried += 1
+                print(f"[Gemini] Error caught (attempt {attempt+1}): {err[:80]}... rotating key")
+                if keys_tried >= len(API_KEYS) * 2:
+                    raise Exception(
+                        "All 4 API keys exhausted or unavailable. Please wait a few minutes for quota reset, "
+                        "or try again later."
+                    )
+                time.sleep(5)  # Wait a bit longer for 503s
+                continue
+            raise
+    raise Exception("Max retries exceeded for Gemini API call")
+
+
+def _parse_json(text):
+    """Extract JSON from Gemini response, handling invalid LaTeX backslash escapes."""
+    text = text.strip()
+    if text.startswith("```"):
+        text = re.sub(r'^```(?:json)?\s*', '', text)
+        text = re.sub(r'\s*```$', '', text)
+
+    def sanitize_escapes(s):
+        # Replace invalid JSON escape sequences (backslash not followed by valid escape char)
+        # e.g. raw LaTeX like \\lambda, \\sigma get double-escaped so json.loads accepts them
+        return re.sub(r'\\(?!["\\/bfnrtu])', r'\\\\', s)
+
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        try:
+            return json.loads(sanitize_escapes(text))
+        except json.JSONDecodeError:
+            match = re.search(r'\{[\s\S]*\}', text)
+            if match:
+                try:
+                    return json.loads(match.group())
+                except json.JSONDecodeError:
+                    return json.loads(sanitize_escapes(match.group()))
+            raise ValueError(f"Cannot parse JSON: {text[:300]}")
+
+
+
+# ======================================================================
+# FLASK APP
+# ======================================================================
+app = Flask(__name__)
+app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024
+
+from werkzeug.exceptions import HTTPException
+
+@app.errorhandler(Exception)
+def handle_exception(e):
+    # Pass through HTTP errors as JSON instead of HTML
+    if isinstance(e, HTTPException):
+        return jsonify(error=e.description), e.code
+    # Handle non-HTTP exceptions
+    return jsonify(error=str(e)), 500
+
+# Initialize Database
+database.init_db()
+
+UPLOAD_DIR = os.path.join(os.path.dirname(__file__), 'uploads')
+os.makedirs(UPLOAD_DIR, exist_ok=True)
+
+
+# ======================================================================
+# PDF IMAGE EXTRACTION — Extract individual diagrams from PDF
+# ======================================================================
+def extract_images_from_pdf(pdf_path, test_id):
+    """Extract individual embedded images from PDF and render page crops for diagrams."""
+    img_dir = os.path.join(os.path.dirname(__file__), 'static', 'test_images', test_id)
+    os.makedirs(img_dir, exist_ok=True)
+
+    doc = fitz.open(pdf_path)
+    extracted = []
+    global_idx = 0
+
+    for page_num in range(len(doc)):
+        page = doc[page_num]
+        image_list = page.get_images(full=True)
+
+        for img_info in image_list:
+            xref = img_info[0]
+            try:
+                base_image = doc.extract_image(xref)
+                img_bytes = base_image["image"]
+                ext = base_image.get("ext", "png")
+                # Skip tiny images (icons, bullets, etc) — less than 2KB
+                if len(img_bytes) < 2048:
+                    continue
+                filename = f"img_{global_idx}.{ext}"
+                filepath = os.path.join(img_dir, filename)
+                with open(filepath, 'wb') as f:
+                    f.write(img_bytes)
+                extracted.append({
+                    "index": global_idx,
+                    "page": page_num + 1,
+                    "filename": filename,
+                })
+                global_idx += 1
+            except Exception:
+                continue
+
+    # Also render each page as fallback for vector diagrams
+    for page_num in range(len(doc)):
+        page = doc[page_num]
+        pix = page.get_pixmap(dpi=250)
+        pix.save(os.path.join(img_dir, f"page_{page_num + 1}.png"))
+
+    doc.close()
+    print(f"[Images] Extracted {len(extracted)} individual images from PDF")
+    return extracted
+
+
+# ======================================================================
+# GEMINI: Extract questions from PDFs
+# ======================================================================
+# ======================================================================
+def extract_questions_from_pdfs(q_path, a_path, test_id, image_info, max_full_retries=4):
+    """Upload PDFs to Gemini and extract structured questions with diagram mapping."""
+    for attempt in range(max_full_retries):
+        upload_client = _get_client()
+        _rate_limit_wait()
+
+        q_file = upload_client.files.upload(file=q_path)
+        a_file = upload_client.files.upload(file=a_path)
+
+        for f in [q_file, a_file]:
+            while f.state.name == "PROCESSING":
+                time.sleep(2)
+                f = upload_client.files.get(name=f.name)
+
+        # Build image info for the prompt
+        img_summary = f"I extracted {len(image_info)} images from the question paper PDF in order of appearance (indexed 0 to {len(image_info)-1})."
+        per_page = {}
+        for img in image_info:
+            pg = img['page']
+            if pg not in per_page:
+                per_page[pg] = []
+            per_page[pg].append(img['index'])
+        for pg in sorted(per_page.keys()):
+            img_summary += f"\n  Page {pg}: image indices {per_page[pg]}"
+
+        prompt = f"""You are a JEE/NEET exam paper analyzer. I'm giving you two PDFs:
+1. FIRST PDF: The Question Paper  
+2. SECOND PDF: The Answer Key
+ 
+{img_summary}
+
+Extract ALL questions and match with correct answers. Return ONLY valid JSON:
+{{
+  "test_name": "Name of test",
+  "total_questions": <number>,
+  "subjects": ["Physics", "Chemistry", "Mathematics"],
+  "duration_minutes": 180,
+  "questions": [
+    {{
+      "id": 1,
+      "subject": "Physics",
+      "topic": "Electrostatics",
+      "text": "Question stem ONLY — no options here.",
+      "type": "MCQ_SINGLE",
+      "options": {{"A": "option A", "B": "option B", "C": "option C", "D": "option D"}},
+      "correct_answer": "B",
+      "marks_correct": 4,
+      "marks_incorrect": -1,
+      "page_number": 1,
+      "has_diagram": true,
+      "diagram_bbox": [320, 150, 560, 850]
+    }}
+  ]
+}}
+
+CRITICAL RULES:
+- "type": "MCQ_SINGLE", "MCQ_MULTI", or "INTEGER"
+- MCQ_SINGLE: correct_answer = single letter. MCQ_MULTI: comma-separated. INTEGER: numerical string, options=null.
+- "page_number": page in question paper (1-indexed)
+- !!!CRITICAL OPTIONS RULE!!!: The options/choices (e.g. (1)...(2)... or (A)...(B)...) must NEVER appear in the "text" field. The "text" field contains ONLY the question stem. Parse ALL options ONLY into the "options" dict with keys A, B, C, D.
+- "has_diagram": true ONLY if there is an actual figure, graph, circuit diagram, or scientific illustration that is part of the question. Logos, watermarks, and page decorations are NOT diagrams.
+- "diagram_bbox": REQUIRED whenever has_diagram is true. Provide the bounding box of ONLY the actual diagram/figure (NOT the question text, NOT the options, NOT logos) as [ymin, xmin, ymax, xmax] in normalized 0-1000 scale relative to the full page. The ymin value must be BELOW all question text — start the box from the very top edge of the drawn figure/illustration itself. Be tight and precise.
+- Preserve ALL math as LaTeX ($...$)
+- Extract EVERY question
+- MARKING: marks_correct=4, marks_incorrect=-1 for ALL types"""
+
+        try:
+            text = _call_gemini([prompt, q_file, a_file], client=upload_client)
+            
+            try:
+                data = _parse_json(text)
+            except Exception as e:
+                print(f"Error parsing Gemini response: {e}")
+                data = json.loads(text)
+
+            try:
+                upload_client.files.delete(name=q_file.name)
+                upload_client.files.delete(name=a_file.name)
+            except:
+                pass
+
+            return data
+            
+        except Exception as e:
+            err = str(e)
+            try:
+                upload_client.files.delete(name=q_file.name)
+                upload_client.files.delete(name=a_file.name)
+            except:
+                pass
+                
+            if "FIXED_CLIENT_EXHAUSTED" in err:
+                print(f"[Process] Key exhausted during extraction! Deleting files and retrying with next key... ({attempt+1}/{max_full_retries})")
+                continue
+            raise e
+            
+    raise Exception("All API keys exhausted or failed during extraction.")
+
+
+def analyze_concepts(wrong_questions, all_questions):
+    """Analyze wrong/unattempted questions and suggest topics to study."""
+    wrong_details = []
+    for w in wrong_questions:
+        q = next((q for q in all_questions if str(q['id']) == str(w['id'])), None)
+        if q:
+            wrong_details.append({
+                "subject": q['subject'], "topic": q.get('topic', 'General'),
+                "question": q['text'][:200], "correct_answer": q['correct_answer'],
+                "user_answer": w.get('user_answer', 'Not Attempted'), "type": q['type']
+            })
+    if not wrong_details:
+        return {"summary": "Perfect score!", "subject_analysis": {},
+                "recommendations": ["Keep it up!"], "priority_topics": [], "common_mistakes": []}
+
+    prompt = f"""You are a JEE/NEET mentor. Analyze these wrong/unattempted answers:
+{json.dumps(wrong_details, indent=2)}
+
+Return ONLY valid JSON:
+{{
+  "summary": "2-3 sentence overview",
+  "subject_analysis": {{
+    "Physics": {{
+      "score_comment": "Performance summary",
+      "weak_topics": ["topic1"],
+      "strong_topics": ["topic2"],
+      "key_gaps": "What concepts need work"
+    }}
+  }},
+  "recommendations": ["actionable tip 1", "actionable tip 2", "actionable tip 3"],
+  "priority_topics": [
+    {{"topic": "Name", "subject": "Subject", "reason": "Why", "study_plan": "How to improve"}}
+  ],
+  "common_mistakes": ["pattern 1", "pattern 2"]
+}}
+
+Be specific, encouraging, and actionable."""
+
+    text = _call_gemini(prompt)
+    return _parse_json(text)
+
+
+def _check_answer(user_ans, correct_ans, q_type):
+    user_ans = str(user_ans).strip().upper()
+    correct_ans = str(correct_ans).strip().upper()
+    if q_type == 'MCQ_SINGLE':
+        return user_ans == correct_ans
+    elif q_type == 'MCQ_MULTI':
+        return set(x.strip() for x in user_ans.split(',')) == set(x.strip() for x in correct_ans.split(','))
+    elif q_type == 'INTEGER':
+        try:
+            return abs(float(user_ans) - float(correct_ans)) < 0.01
+        except:
+            return user_ans == correct_ans
+    return user_ans == correct_ans
+
+
+# ======================================================================
+# ROUTES
+# ======================================================================
+@app.route('/')
+def index():
+    return render_template('index.html')
+
+
+@app.route('/api/process', methods=['POST'])
+def process_pdfs():
+    if 'question_paper' not in request.files or 'answer_key' not in request.files:
+        return jsonify({"error": "Both PDFs required"}), 400
+    q_file = request.files['question_paper']
+    a_file = request.files['answer_key']
+    if not q_file.filename.endswith('.pdf') or not a_file.filename.endswith('.pdf'):
+        return jsonify({"error": "Only PDF files accepted"}), 400
+
+    test_id = str(uuid.uuid4())[:8]
+    q_path = os.path.join(UPLOAD_DIR, f"{test_id}_q.pdf")
+    a_path = os.path.join(UPLOAD_DIR, f"{test_id}_a.pdf")
+    q_file.save(q_path)
+    a_file.save(a_path)
+
+    try:
+        # Step 1: Extract individual images from question paper PDF
+        print(f"[Process] Extracting images for {test_id}...")
+        image_info = extract_images_from_pdf(q_path, test_id)
+
+        # Step 2: Send to Gemini for question extraction with image mapping
+        print(f"[Process] Sending to Gemini for extraction...")
+        test_data = extract_questions_from_pdfs(q_path, a_path, test_id, image_info)
+        test_data['test_id'] = test_id
+        test_data['image_info'] = image_info
+        test_data['created_at'] = datetime.now().isoformat()
+
+        # Crop diagrams using bbox coordinates from Gemini (works for both vector AND raster)
+        try:
+            from PIL import Image as PILImage, ImageStat
+
+            def _trim_leading_text(img):
+                """Scan from the top and trim text lines that leaked above the diagram.
+                Uses dark-pixel fraction per row to robustly detect the gap between
+                question text and the actual figure, even on slightly gray backgrounds."""
+                gray = img.convert('L')
+                width, height = gray.size
+                if width == 0 or height == 0:
+                    return img
+
+                saw_content = False
+                new_top = 0
+
+                for y in range(height):
+                    row = gray.crop((0, y, width, y + 1))
+                    pixels = list(row.getdata())
+                    # Count pixels darker than 210 (text ink, diagram lines)
+                    dark_count = sum(1 for p in pixels if p < 210)
+                    dark_frac = dark_count / width
+
+                    if dark_frac > 0.01:   # row has content (>1% dark pixels)
+                        saw_content = True
+                    elif saw_content:       # mostly-white row after content
+                        new_top = y
+                        break
+
+                # Only trim if gap starts far enough in to be meaningful text
+                if new_top > 4:
+                    return img.crop((0, new_top, width, height))
+                return img
+
+            img_dir = os.path.join(app.root_path, 'static', 'test_images', test_id)
+            for q in test_data.get('questions', []):
+                if q.get('has_diagram') and q.get('diagram_bbox') and q.get('page_number'):
+                    bbox = q['diagram_bbox']
+                    pg = q['page_number']
+                    if isinstance(bbox, list) and len(bbox) == 4:
+                        page_path = os.path.join(img_dir, f"page_{pg}.png")
+                        if os.path.exists(page_path):
+                            img = PILImage.open(page_path)
+                            W, H = img.size
+                            ymin, xmin, ymax, xmax = bbox
+                            left   = max(0, (xmin / 1000) * W - 20)
+                            top    = max(0, (ymin / 1000) * H - 20)
+                            right  = min(W, (xmax / 1000) * W + 20)
+                            bottom = min(H, (ymax / 1000) * H + 20)
+                            if right > left and bottom > top:
+                                cropped = img.crop((left, top, right, bottom))
+                                # Auto-trim any text that leaked in from above the figure
+                                cropped = _trim_leading_text(cropped)
+                                fname = f"q{q['id']}_diagram.png"
+                                cropped.save(os.path.join(img_dir, fname))
+                                q['diagram_crop'] = fname
+                                print(f"[Diagram] Cropped diagram for Q{q['id']} -> {fname}")
+        except Exception as e:
+            print(f"[Diagram] Crop error: {e}")
+
+        qcount = len(test_data.get('questions', []))
+        diagram_questions = [q for q in test_data.get('questions', []) if q.get('has_diagram')]
+        
+        # Save as draft — needs diagram review before going live
+        test_data['status'] = 'draft'
+        database.save_test(test_id, test_data.get('test_name', 'Test'), test_data)
+
+        print(f"[Process] ✅ Extracted {qcount} questions, {len(diagram_questions)} diagram questions")
+        return jsonify({
+            "success": True,
+            "test_id": test_id,
+            "test_name": test_data.get('test_name', 'Test'),
+            "total_questions": test_data.get('total_questions', qcount),
+            "subjects": test_data.get('subjects', []),
+            "duration_minutes": test_data.get('duration_minutes', 180),
+            "needs_review": len(diagram_questions) > 0,
+            "diagram_count": len(diagram_questions),
+            "review_url": f"/review/{test_id}"
+        })
+    except Exception as e:
+        print(f"[Process] ERROR: {traceback.format_exc()}")
+        error_msg = str(e)
+        if 'quota' in error_msg.lower() or '429' in error_msg or 'exhausted' in error_msg.lower():
+            error_msg = ("⚠️ All API keys exhausted! Please wait a few minutes for quota reset.")
+        return jsonify({"error": error_msg}), 500
+    finally:
+        for p in [q_path, a_path]:
+            try: os.remove(p)
+            except: pass
+
+
+# ======================================================================
+# DIAGRAM REVIEW: Human-in-the-loop crop correction
+# ======================================================================
+
+@app.route('/review/<test_id>')
+def review_page(test_id):
+    test = database.get_test(test_id)
+    if not test:
+        return redirect(url_for('index'))
+    return render_template('review.html', test_id=test_id)
+
+
+@app.route('/api/review/<test_id>')
+def get_review_data(test_id):
+    test = database.get_test(test_id)
+    if not test:
+        return jsonify({'error': 'Not found'}), 404
+    all_qs = []
+    for q in test.get('questions', []):
+        all_qs.append({
+            'id': q['id'],
+            'subject': q.get('subject', ''),
+            'type': q.get('type', 'MCQ_SINGLE'),
+            'text': q.get('text', '')[:150] + ('...' if len(q.get('text', '')) > 150 else ''),
+            'page_number': q.get('page_number'),
+            'has_diagram': q.get('has_diagram', False),
+            'diagram_crop': q.get('diagram_crop'),
+            'page_image': f"page_{q.get('page_number')}.png"
+        })
+    return jsonify({
+        'test_name': test.get('test_name', 'Test'),
+        'test_id': test_id,
+        'total_questions': len(all_qs),
+        'questions': all_qs
+    })
+
+
+@app.route('/api/crop/<test_id>/<int:q_id>', methods=['POST'])
+def update_crop(test_id, q_id):
+    """Accept manual crop coordinates from the review tool and re-crop."""
+    data = request.json
+    x1, y1, x2, y2 = int(data['x1']), int(data['y1']), int(data['x2']), int(data['y2'])
+    page_num = data['page_number']
+
+    img_dir = os.path.join(app.root_path, 'static', 'test_images', test_id)
+    page_path = os.path.join(img_dir, f'page_{page_num}.png')
+    if not os.path.exists(page_path):
+        return jsonify({'error': 'Page image not found'}), 404
+
+    try:
+        from PIL import Image as PILImage
+        img = PILImage.open(page_path)
+        W, H = img.size
+        left   = max(0, min(x1, x2))
+        top    = max(0, min(y1, y2))
+        right  = min(W, max(x1, x2))
+        bottom = min(H, max(y1, y2))
+        if right <= left or bottom <= top:
+            return jsonify({'error': 'Invalid crop region'}), 400
+        cropped = img.crop((left, top, right, bottom))
+        fname = f'q{q_id}_diagram.png'
+        cropped.save(os.path.join(img_dir, fname))
+
+        # Update the stored test data
+        test = database.get_test(test_id)
+        for q in test.get('questions', []):
+            if q['id'] == q_id:
+                q['diagram_crop'] = fname
+                break
+        database.save_test(test_id, test.get('test_name', 'Test'), test)
+        return jsonify({'success': True, 'diagram_crop': fname, 'cache_bust': str(uuid.uuid4())[:8]})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/crop/<test_id>/<int:q_id>', methods=['DELETE'])
+def remove_crop(test_id, q_id):
+    """Remove a diagram from a question."""
+    img_dir = os.path.join(app.root_path, 'static', 'test_images', test_id)
+    fname = f'q{q_id}_diagram.png'
+    fpath = os.path.join(img_dir, fname)
+    try:
+        if os.path.exists(fpath):
+            os.remove(fpath)
+    except Exception:
+        pass
+    test = database.get_test(test_id)
+    if test:
+        for q in test.get('questions', []):
+            if q['id'] == q_id:
+                q['diagram_crop'] = None
+                q['has_diagram'] = False
+                break
+        database.save_test(test_id, test.get('test_name', 'Test'), test)
+    return jsonify({'success': True})
+
+
+@app.route('/api/test/<test_id>', methods=['PATCH'])
+def rename_test(test_id):
+    """Rename a test."""
+    data = request.json
+    new_name = (data.get('name') or '').strip()
+    if not new_name:
+        return jsonify({'error': 'Name cannot be empty'}), 400
+    test = database.get_test(test_id)
+    if not test:
+        return jsonify({'error': 'Not found'}), 404
+    test['test_name'] = new_name
+    database.save_test(test_id, new_name, test)
+    return jsonify({'success': True, 'name': new_name})
+
+
+@app.route('/api/finalize/<test_id>', methods=['POST'])
+def finalize_test(test_id):
+    """Mark a draft test as ready to take."""
+    test = database.get_test(test_id)
+    if not test:
+        return jsonify({'error': 'Not found'}), 404
+    test['status'] = 'ready'
+    database.save_test(test_id, test.get('test_name', 'Test'), test)
+    return jsonify({'success': True, 'test_url': f'/test/{test_id}'})
+
+
+@app.route('/test/<test_id>')
+def test_page(test_id):
+    if not database.get_test(test_id):
+        return redirect(url_for('index'))
+    return render_template('test.html', test_id=test_id)
+
+
+@app.route('/api/test/<test_id>')
+def get_test_data(test_id):
+    test = database.get_test(test_id)
+    if not test:
+        return jsonify({"error": "Not found"}), 404
+    # Strip correct answers, keep diagram info
+    safe_q = []
+    for q in test.get('questions', []):
+        sq = {k: v for k, v in q.items() if k != 'correct_answer'}
+        safe_q.append(sq)
+    return jsonify({"test_id": test_id, "test_name": test.get('test_name', 'Test'),
+                    "total_questions": len(safe_q), "subjects": test.get('subjects', []),
+                    "duration_minutes": test.get('duration_minutes', 180), "questions": safe_q,
+                    "image_info": test.get('image_info', [])})
+
+
+@app.route('/api/submit', methods=['POST'])
+def submit_test():
+    data = request.json
+    test_id = data.get('test_id')
+    user_answers = data.get('answers', {})
+    time_taken = data.get('time_taken_seconds', 0)
+
+    test = database.get_test(test_id)
+    if not test:
+        return jsonify({"error": "Not found"}), 404
+
+    questions = test.get('questions', [])
+    results = []
+    total_score = max_score = correct_count = incorrect_count = unattempted_count = 0
+    wrong_questions = []
+    subject_scores = {}
+
+    for q in questions:
+        qid = str(q['id'])
+        correct = q.get('correct_answer', '')
+        user_ans = user_answers.get(qid, '')
+        mc = q.get('marks_correct', 4)
+        mi = q.get('marks_incorrect', -1)
+        max_score += mc
+        subj = q.get('subject', 'General')
+        if subj not in subject_scores:
+            subject_scores[subj] = {'correct': 0, 'incorrect': 0, 'unattempted': 0,
+                                     'score': 0, 'max_score': 0, 'total': 0}
+        subject_scores[subj]['total'] += 1
+        subject_scores[subj]['max_score'] += mc
+
+        r = {'id': q['id'], 'subject': subj, 'topic': q.get('topic', ''), 'text': q['text'],
+             'type': q.get('type', 'MCQ_SINGLE'), 'options': q.get('options'),
+             'correct_answer': correct, 'user_answer': user_ans,
+             'marks_correct': mc, 'marks_incorrect': mi,
+             'has_diagram': q.get('has_diagram', False),
+             'diagram_crop': q.get('diagram_crop'),
+             'page_number': q.get('page_number', 1)}
+
+        if not user_ans:
+            r['status'] = 'unattempted'; r['marks_obtained'] = 0; unattempted_count += 1
+            subject_scores[subj]['unattempted'] += 1
+            wrong_questions.append({'id': q['id'], 'user_answer': 'Not Attempted'})
+        elif _check_answer(user_ans, correct, q.get('type', 'MCQ_SINGLE')):
+            r['status'] = 'correct'; r['marks_obtained'] = mc; total_score += mc; correct_count += 1
+            subject_scores[subj]['correct'] += 1; subject_scores[subj]['score'] += mc
+        else:
+            r['status'] = 'incorrect'; r['marks_obtained'] = mi; total_score += mi; incorrect_count += 1
+            subject_scores[subj]['incorrect'] += 1; subject_scores[subj]['score'] += mi
+            wrong_questions.append({'id': q['id'], 'user_answer': user_ans})
+        results.append(r)
+
+    try:
+        analysis = analyze_concepts(wrong_questions, questions)
+    except Exception as e:
+        analysis = {"summary": f"Analysis unavailable: {e}", "subject_analysis": {},
+                    "recommendations": ["Review wrong answers manually."],
+                    "priority_topics": [], "common_mistakes": []}
+
+    result_id = str(uuid.uuid4())[:8]
+    result_data = {
+        'result_id': result_id, 'test_id': test_id,
+        'test_name': test.get('test_name', 'Test'),
+        'total_score': total_score, 'max_score': max_score,
+        'correct': correct_count, 'incorrect': incorrect_count, 'unattempted': unattempted_count,
+        'total_questions': len(questions),
+        'accuracy': round((correct_count / max(correct_count + incorrect_count, 1)) * 100, 1),
+        'percentage': round((total_score / max(max_score, 1)) * 100, 1),
+        'time_taken_seconds': time_taken, 'subject_scores': subject_scores,
+        'questions': results, 'analysis': analysis, 'submitted_at': datetime.now().isoformat()
+    }
+    
+    database.save_attempt(result_id, test_id, test.get('test_name', 'Test'), total_score, max_score, result_data)
+    return jsonify(result_data)
+
+
+@app.route('/result/<result_id>')
+def result_page(result_id):
+    if not database.get_attempt(result_id):
+        return redirect(url_for('index'))
+    return render_template('result.html', result_id=result_id)
+
+
+@app.route('/api/result/<result_id>')
+def get_result_data(result_id):
+    attempt = database.get_attempt(result_id)
+    if not attempt:
+        return jsonify({"error": "Not found"}), 404
+    return jsonify(attempt)
+
+
+# ======================================================================
+# NEW ROUTES: Dashboard, Mistakes, Delete, Import/Export
+# ======================================================================
+
+@app.route('/api/dashboard')
+def get_dashboard_data():
+    return jsonify({
+        "tests": database.get_all_tests(),
+        "attempts": database.get_all_attempts()
+    })
+
+@app.route('/api/attempt/<attempt_id>', methods=['DELETE'])
+def delete_attempt_route(attempt_id):
+    database.delete_attempt(attempt_id)
+    return jsonify({"success": True})
+
+@app.route('/api/test/<test_id>', methods=['DELETE'])
+def delete_test_route(test_id):
+    database.delete_test(test_id)
+    # Remove associated static images
+    img_dir = os.path.join(app.root_path, 'static', 'test_images', test_id)
+    if os.path.exists(img_dir):
+        import shutil
+        shutil.rmtree(img_dir, ignore_errors=True)
+    return jsonify({"success": True})
+
+@app.route('/mistakes')
+def mistakes_page():
+    return render_template('mistakes.html')
+
+@app.route('/api/mistakes')
+def get_mistakes_data():
+    return jsonify(database.get_all_mistakes())
+
+@app.route('/api/export')
+def export_data():
+    return jsonify({
+        "version": 1,
+        "tests": [database.get_test(t['id']) for t in database.get_all_tests()],
+        "attempts": [database.get_attempt(a['id']) for a in database.get_all_attempts()]
+    })
+
+@app.route('/api/import', methods=['POST'])
+def import_data():
+    try:
+        data = request.json
+        if not data or 'tests' not in data:
+            return jsonify({"error": "Invalid format"}), 400
+        
+        imported_tests = 0
+        imported_attempts = 0
+        
+        for t in data.get('tests', []):
+            if t and 'test_id' in t:
+                database.save_test(t['test_id'], t.get('test_name', 'Imported Test'), t)
+                imported_tests += 1
+                
+        for a in data.get('attempts', []):
+            if a and 'result_id' in a and 'test_id' in a:
+                database.save_attempt(a['result_id'], a['test_id'], a.get('test_name', 'Imported'), 
+                                      a.get('total_score', 0), a.get('max_score', 0), a)
+                imported_attempts += 1
+                
+        return jsonify({"success": True, "tests": imported_tests, "attempts": imported_attempts})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+if __name__ == '__main__':
+    print(f"[Boot] Loaded {len(API_KEYS)} API keys for rotation")
+    print(f"[Boot] Request delay: {REQUEST_DELAY}s between Gemini calls")
+    # Bind to 0.0.0.0 for deployment
+    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5050)), debug=True, use_reloader=False)
