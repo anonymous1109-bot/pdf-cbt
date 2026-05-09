@@ -141,6 +141,10 @@ database.init_db()
 UPLOAD_DIR = os.path.join(os.path.dirname(__file__), 'uploads')
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
+# Always ensure static image directory exists (works on Render without Dockerfile symlinks)
+STATIC_IMG_DIR = os.path.join(os.path.dirname(__file__), 'static', 'test_images')
+os.makedirs(STATIC_IMG_DIR, exist_ok=True)
+
 
 # ======================================================================
 # PDF IMAGE EXTRACTION — Extract individual diagrams from PDF
@@ -702,6 +706,7 @@ def get_test_data(test_id):
 
 
 @app.route('/api/submit', methods=['POST'])
+@login_required
 def submit_test():
     data = request.json
     test_id = data.get('test_id')
@@ -853,13 +858,13 @@ def import_data():
         
         for t in data.get('tests', []):
             if t and 'test_id' in t:
-                database.save_test(t['test_id'], t.get('test_name', 'Imported Test'), t)
+                database.save_test(t['test_id'], t.get('test_name', 'Imported Test'), t, current_user.id)
                 imported_tests += 1
                 
         for a in data.get('attempts', []):
             if a and 'result_id' in a and 'test_id' in a:
-                database.save_attempt(a['result_id'], a['test_id'], a.get('test_name', 'Imported'), 
-                                      a.get('total_score', 0), a.get('max_score', 0), a)
+                database.save_attempt(a['result_id'], a['test_id'], a.get('test_name', 'Imported'),
+                                      a.get('total_score', 0), a.get('max_score', 0), a, current_user.id)
                 imported_attempts += 1
                 
         return jsonify({"success": True, "tests": imported_tests, "attempts": imported_attempts})
@@ -871,4 +876,4 @@ if __name__ == '__main__':
     print(f"[Boot] Loaded {len(API_KEYS)} API keys for rotation")
     print(f"[Boot] Request delay: {REQUEST_DELAY}s between Gemini calls")
     # Bind to 0.0.0.0 for deployment
-    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5050)), debug=True, use_reloader=False)
+    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5050)), debug=False, use_reloader=False)
