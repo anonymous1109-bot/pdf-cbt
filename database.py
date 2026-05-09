@@ -1,96 +1,51 @@
 import os
 import json
-import sqlite3
-import uuid
 from datetime import datetime
-from urllib.parse import urlparse
+import psycopg2
+from psycopg2.extras import RealDictCursor
 
-# DATABASE SELECTION
-DATABASE_URL = os.environ.get('DATABASE_URL')
-IS_POSTGRES = DATABASE_URL is not None and DATABASE_URL.startswith('postgres')
+# Fetch the Supabase URL from Render Environment Variables
+DB_URL = os.environ.get('DATABASE_URL')
 
 def get_db():
-    if IS_POSTGRES:
-        import psycopg2
-        from psycopg2.extras import RealDictCursor
-        # Fix for Render/Supabase needing sslmode
-        conn = psycopg2.connect(DATABASE_URL, sslmode='require', cursor_factory=RealDictCursor)
-        return conn
-    else:
-        DATA_DIR = os.environ.get('DATA_DIR', os.path.dirname(__file__))
-        DB_PATH = os.path.join(DATA_DIR, 'tests.db')
-        conn = sqlite3.connect(DB_PATH, check_same_thread=False, timeout=15)
-        conn.row_factory = sqlite3.Row
-        return conn
-
-def execute_query(query, params=(), commit=False):
-    conn = get_db()
-    # Handle dialect differences for parameter markers (? vs %s)
-    if IS_POSTGRES:
-        query = query.replace('?', '%s')
-        # Handle SQLite specific INSERT OR REPLACE
-        if 'INSERT OR REPLACE' in query:
-            # This is a very basic translation, specific to our schema
-            if 'INTO tests' in query:
-                query = query.replace('INSERT OR REPLACE INTO tests', 'INSERT INTO tests')
-                query += ' ON CONFLICT (id) DO UPDATE SET user_id=EXCLUDED.user_id, name=EXCLUDED.name, data_json=EXCLUDED.data_json, created_at=EXCLUDED.created_at'
-            elif 'INTO attempts' in query:
-                query = query.replace('INSERT OR REPLACE INTO attempts', 'INSERT INTO attempts')
-                query += ' ON CONFLICT (id) DO UPDATE SET user_id=EXCLUDED.user_id, test_id=EXCLUDED.test_id, test_name=EXCLUDED.test_name, score=EXCLUDED.score, max_score=EXCLUDED.max_score, result_json=EXCLUDED.result_json, submitted_at=EXCLUDED.submitted_at'
-    
-    cur = conn.cursor()
-    try:
-        cur.execute(query, params)
-        if commit:
-            conn.commit()
-            if not IS_POSTGRES:
-                res = cur.lastrowid
-            else:
-                res = True # Postgres usually needs RETURNING for ID
-        else:
-            res = cur.fetchall()
-            # Convert to list of dicts for SQLite/Postgres consistency
-            res = [dict(r) for r in res]
-    finally:
-        conn.close()
-    return res
+    if not DB_URL:
+        raise ValueError("DATABASE_URL environment variable is not set!")
+    # RealDictCursor makes rows behave like dictionaries, matching your old SQLite setup
+    conn = psycopg2.connect(DB_URL, cursor_factory=RealDictCursor)
+    return conn
 
 def init_db():
     conn = get_db()
-    cur = conn.cursor()
+    c = conn.cursor()
     
-    if not IS_POSTGRES:
-        cur.execute('PRAGMA journal_mode=WAL;')
-        id_type = "INTEGER PRIMARY KEY AUTOINCREMENT"
-    else:
-        id_type = "SERIAL PRIMARY KEY"
-
-    # Users table
-    cur.execute(f'''
+    # 1. Users table (AUTOINCREMENT becomes SERIAL in Postgres)
+    c.execute('''
         CREATE TABLE IF NOT EXISTS users (
-            id {id_type},
+            id SERIAL PRIMARY KEY,
             email TEXT UNIQUE NOT NULL,
             password_hash TEXT NOT NULL,
             name TEXT,
             created_at TEXT
         )
     ''')
-    # Tests table
-    cur.execute('''
+    
+    # 2. Tests table 
+    c.execute('''
         CREATE TABLE IF NOT EXISTS tests (
             id TEXT PRIMARY KEY,
-            user_id INTEGER,
+            user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
             name TEXT,
             data_json TEXT,
             created_at TEXT
         )
     ''')
-    # Attempts table
-    cur.execute('''
+    
+    # 3. Attempts table
+    c.execute('''
         CREATE TABLE IF NOT EXISTS attempts (
             id TEXT PRIMARY KEY,
-            user_id INTEGER,
-            test_id TEXT,
+            user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+            test_id TEXT REFERENCES tests(id) ON DELETE CASCADE,
             test_name TEXT,
             score REAL,
             max_score REAL,
@@ -98,116 +53,168 @@ def init_db():
             submitted_at TEXT
         )
     ''')
+
     conn.commit()
     conn.close()
 
+# ======================================================================
+# USER FUNCTIONS
+# ======================================================================
 def create_user(email, password_hash, name):
-    query = 'INSERT INTO users (email, password_hash, name, created_at) VALUES (?, ?, ?, ?) RETURNING id' if IS_POSTGRES else 'INSERT INTO users (email, password_hash, name, created_at) VALUES (?, ?, ?, ?)'
-    params = (email.lower().strip(), password_hash, name, datetime.now().isoformat())
-    
     conn = get_db()
-    cur = conn.cursor()
+    c = conn.cursor()
     try:
-        if IS_POSTGRES:
-            cur.execute(query.replace('?', '%s'), params)
-            user_id = cur.fetchone()['id']
-        else:
-            cur.execute(query, params)
-            user_id = cur.lastrowid
+        # Postgres uses %s instead of ?
+        c.execute('''
+            INSERT INTO users (email, password_hash, name, created_at)
+            VALUES (%s, %s, %s, %s) RETURNING id
+        ''', (email.lower().strip(), password_hash, name, datetime.now().isoformat()))
+        user_id = c.fetchone()['id']
         conn.commit()
         return user_id
-    except Exception:
+    except psycopg2.IntegrityError:
+        conn.rollback()
         return None
     finally:
         conn.close()
 
 def get_user_by_email(email):
-    res = execute_query('SELECT * FROM users WHERE email = ?', (email.lower().strip(),))
-    return res[0] if res else None
+    conn = get_db()
+    c = conn.cursor()
+    c.execute('SELECT * FROM users WHERE email = %s', (email.lower().strip(),))
+    row = c.fetchone()
+    conn.close()
+    return dict(row) if row else None
 
 def get_user_by_id(user_id):
-    res = execute_query('SELECT * FROM users WHERE id = ?', (user_id,))
-    return res[0] if res else None
+    conn = get_db()
+    c = conn.cursor()
+    c.execute('SELECT * FROM users WHERE id = %s', (user_id,))
+    row = c.fetchone()
+    conn.close()
+    return dict(row) if row else None
 
+# ======================================================================
+# TEST FUNCTIONS (user-scoped)
+# ======================================================================
 def save_test(test_id, name, data, user_id=None):
-    query = 'INSERT OR REPLACE INTO tests (id, user_id, name, data_json, created_at) VALUES (?, ?, ?, ?, ?)'
-    params = (test_id, user_id, name, json.dumps(data), datetime.now().isoformat())
-    execute_query(query, params, commit=True)
+    conn = get_db()
+    c = conn.cursor()
+    # Postgres uses ON CONFLICT DO UPDATE instead of INSERT OR REPLACE
+    c.execute('''
+        INSERT INTO tests (id, user_id, name, data_json, created_at)
+        VALUES (%s, %s, %s, %s, %s)
+        ON CONFLICT (id) DO UPDATE SET 
+            name = EXCLUDED.name, 
+            data_json = EXCLUDED.data_json
+    ''', (test_id, user_id, name, json.dumps(data), datetime.now().isoformat()))
+    conn.commit()
+    conn.close()
 
 def get_test(test_id, user_id=None):
+    conn = get_db()
+    c = conn.cursor()
     if user_id is not None:
-        query = 'SELECT data_json FROM tests WHERE id = ? AND (user_id = ? OR user_id IS NULL)'
-        params = (test_id, user_id)
+        c.execute('SELECT data_json FROM tests WHERE id = %s AND (user_id = %s OR user_id IS NULL)', (test_id, user_id))
     else:
-        query = 'SELECT data_json FROM tests WHERE id = ?'
-        params = (test_id,)
-    res = execute_query(query, params)
-    return json.loads(res[0]['data_json']) if res else None
+        c.execute('SELECT data_json FROM tests WHERE id = %s', (test_id,))
+    row = c.fetchone()
+    conn.close()
+    return json.loads(row['data_json']) if row else None
 
 def get_all_tests(user_id=None):
+    conn = get_db()
+    c = conn.cursor()
     if user_id is not None:
-        query = 'SELECT id, name, created_at, data_json FROM tests WHERE user_id = ? OR user_id IS NULL ORDER BY created_at DESC'
-        params = (user_id,)
+        c.execute('SELECT id, name, created_at, data_json FROM tests WHERE user_id = %s OR user_id IS NULL ORDER BY created_at DESC', (user_id,))
     else:
-        query = 'SELECT id, name, created_at, data_json FROM tests ORDER BY created_at DESC'
-        params = ()
-    
-    rows = execute_query(query, params)
+        c.execute('SELECT id, name, created_at, data_json FROM tests ORDER BY created_at DESC')
+    rows = c.fetchall()
+    conn.close()
     results = []
     for r in rows:
         try:
             data = json.loads(r['data_json'])
-        except Exception: data = {}
+        except Exception:
+            data = {}
         results.append({
-            'id': r['id'], 'name': r['name'], 'created_at': r['created_at'],
+            'id': r['id'],
+            'name': r['name'],
+            'created_at': r['created_at'],
             'status': data.get('status', 'ready'),
-            'total_questions': data.get('total_questions') or len(data.get('questions', [])),
-            'duration_minutes': data.get('duration_minutes', 180)
+            'total_questions': data.get('total_questions') or len(data.get('questions', []))
         })
     return results
 
 def delete_test(test_id, user_id=None):
+    conn = get_db()
+    c = conn.cursor()
     if user_id is not None:
-        execute_query('DELETE FROM tests WHERE id = ? AND user_id = ?', (test_id, user_id), commit=True)
+        c.execute('DELETE FROM tests WHERE id = %s AND user_id = %s', (test_id, user_id))
     else:
-        execute_query('DELETE FROM tests WHERE id = ?', (test_id,), commit=True)
+        c.execute('DELETE FROM tests WHERE id = %s', (test_id,))
+    conn.commit()
+    conn.close()
 
+# ======================================================================
+# ATTEMPT FUNCTIONS (user-scoped)
+# ======================================================================
 def save_attempt(attempt_id, test_id, test_name, score, max_score, data, user_id=None):
-    query = 'INSERT OR REPLACE INTO attempts (id, user_id, test_id, test_name, score, max_score, result_json, submitted_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
-    params = (attempt_id, user_id, test_id, test_name, score, max_score, json.dumps(data), datetime.now().isoformat())
-    execute_query(query, params, commit=True)
+    conn = get_db()
+    c = conn.cursor()
+    c.execute('''
+        INSERT INTO attempts (id, user_id, test_id, test_name, score, max_score, result_json, submitted_at)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+        ON CONFLICT (id) DO UPDATE SET 
+            score = EXCLUDED.score, 
+            result_json = EXCLUDED.result_json
+    ''', (attempt_id, user_id, test_id, test_name, score, max_score, json.dumps(data), datetime.now().isoformat()))
+    conn.commit()
+    conn.close()
 
 def get_attempt(attempt_id, user_id=None):
+    conn = get_db()
+    c = conn.cursor()
     if user_id is not None:
-        query = 'SELECT result_json FROM attempts WHERE id = ? AND (user_id = ? OR user_id IS NULL)'
-        params = (attempt_id, user_id)
+        c.execute('SELECT result_json FROM attempts WHERE id = %s AND (user_id = %s OR user_id IS NULL)', (attempt_id, user_id))
     else:
-        query = 'SELECT result_json FROM attempts WHERE id = ?'
-        params = (attempt_id,)
-    res = execute_query(query, params)
-    return json.loads(res[0]['result_json']) if res else None
+        c.execute('SELECT result_json FROM attempts WHERE id = %s', (attempt_id,))
+    row = c.fetchone()
+    conn.close()
+    return json.loads(row['result_json']) if row else None
 
 def get_all_attempts(user_id=None):
+    conn = get_db()
+    c = conn.cursor()
     if user_id is not None:
-        query = 'SELECT id, test_id, test_name, score, max_score, submitted_at FROM attempts WHERE user_id = ? OR user_id IS NULL ORDER BY submitted_at DESC'
-        params = (user_id,)
+        c.execute('SELECT id, test_id, test_name, score, max_score, submitted_at FROM attempts WHERE user_id = %s OR user_id IS NULL ORDER BY submitted_at DESC', (user_id,))
     else:
-        query = 'SELECT id, test_id, test_name, score, max_score, submitted_at FROM attempts ORDER BY submitted_at DESC'
-        params = ()
-    return execute_query(query, params)
+        c.execute('SELECT id, test_id, test_name, score, max_score, submitted_at FROM attempts ORDER BY submitted_at DESC')
+    rows = c.fetchall()
+    conn.close()
+    return [{'id': r['id'], 'test_id': r['test_id'], 'test_name': r['test_name'],
+             'score': r['score'], 'max_score': r['max_score'], 'submitted_at': r['submitted_at']} for r in rows]
 
 def delete_attempt(attempt_id, user_id=None):
+    conn = get_db()
+    c = conn.cursor()
     if user_id is not None:
-        execute_query('DELETE FROM attempts WHERE id = ? AND user_id = ?', (attempt_id, user_id), commit=True)
+        c.execute('DELETE FROM attempts WHERE id = %s AND user_id = %s', (attempt_id, user_id))
     else:
-        execute_query('DELETE FROM attempts WHERE id = ?', (attempt_id,), commit=True)
+        c.execute('DELETE FROM attempts WHERE id = %s', (attempt_id,))
+    conn.commit()
+    conn.close()
 
 def get_all_mistakes(user_id=None):
+    conn = get_db()
+    c = conn.cursor()
     if user_id is not None:
-        rows = execute_query('SELECT result_json FROM attempts WHERE user_id = ? OR user_id IS NULL', (user_id,))
+        c.execute('SELECT result_json FROM attempts WHERE user_id = %s OR user_id IS NULL', (user_id,))
     else:
-        rows = execute_query('SELECT result_json FROM attempts')
-    
+        c.execute('SELECT result_json FROM attempts')
+    rows = c.fetchall()
+    conn.close()
+
     mistakes = []
     for row in rows:
         data = json.loads(row['result_json'])
