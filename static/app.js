@@ -173,14 +173,19 @@ function showQuestion(idx) {
     }
 
     buildNavGrid();
+    mathRetries = 0;
     renderMath();
 }
 
 function handleIntegerInput(qid, value) {
-    const cleaned = value.replace(/[^0-9.\-]/g, '');
+    let cleaned = value.replace(/[^0-9.\-]/g, '');
+    if (cleaned.lastIndexOf('-') > 0) cleaned = (cleaned.startsWith('-') ? '-' : '') + cleaned.replace(/-/g, '');
+    const parts = cleaned.split('.');
+    if (parts.length > 2) cleaned = parts[0] + '.' + parts.slice(1).join('');
+
     const inp = document.getElementById('integerAnswer');
     if (inp) inp.value = cleaned;
-    if (cleaned) {
+    if (cleaned && cleaned !== '-') {
         answers[qid] = cleaned;
     } else {
         delete answers[qid];
@@ -219,7 +224,7 @@ function startTimer() {
         if (timerSeconds <= 0) {
             clearInterval(timerInterval);
             alert('⏰ Time\'s up! Auto-submitting...');
-            document.getElementById('confirmSubmit').click();
+            submitTest(testData.test_id);
             return;
         }
         if (timerSeconds <= 300) document.getElementById('timer').classList.add('warning');

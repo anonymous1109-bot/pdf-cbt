@@ -48,16 +48,18 @@ def _get_client():
     return genai.Client(api_key=key)
 
 
+_rate_lock = threading.Lock()
 def _rate_limit_wait():
     """Enforce minimum delay between Gemini requests."""
     global _last_request_time
-    now = time.time()
-    elapsed = now - _last_request_time
-    if elapsed < REQUEST_DELAY:
-        wait = REQUEST_DELAY - elapsed
-        print(f"[RateLimit] Waiting {wait:.1f}s before next request")
-        time.sleep(wait)
-    _last_request_time = time.time()
+    with _rate_lock:
+        now = time.time()
+        elapsed = now - _last_request_time
+        if elapsed < REQUEST_DELAY:
+            wait = REQUEST_DELAY - elapsed
+            print(f"[RateLimit] Waiting {wait:.1f}s before next request")
+            time.sleep(wait)
+        _last_request_time = time.time()
 
 
 def _call_gemini(contents, max_retries=8, client=None):
@@ -219,15 +221,19 @@ def extract_questions_from_pdfs(q_path, a_path, test_id, image_info, max_full_re
             upload_client = _get_client()
             _rate_limit_wait()
 
-            q_file = upload_client.files.upload(file=q_path)
-            a_file = upload_client.files.upload(file=a_path)
+            q_file, a_file = None, None
+            try:
+                q_file = upload_client.files.upload(file=q_path)
+                a_file = upload_client.files.upload(file=a_path)
 
-            for f in [q_file, a_file]:
-                while f.state.name == "PROCESSING":
-                    time.sleep(2)
-                    f = upload_client.files.get(name=f.name)
+                for f in [q_file, a_file]:
+                    while f.state.name == "PROCESSING":
+                        time.sleep(2)
+                        f = upload_client.files.get(name=f.name)
+                    if f.state.name == "FAILED":
+                        raise Exception("Gemini failed to process file")
 
-            img_summary = f"I extracted {len(image_info)} images from the question paper PDF."
+                img_summary = f"I extracted {len(image_info)} images from the question paper PDF."
             
             prompt = f"""You are a JEE/NEET exam paper analyzer. I'm giving you two PDFs.
 FOCUS ONLY ON QUESTIONS LOCATED ON PAGES {start_pg} TO {end_pg} of the Question Paper.
@@ -272,26 +278,30 @@ CRITICAL RULES:
                         'subjects': data.get('subjects', []),
                         'duration_minutes': data.get('duration_minutes', 180)
                     }
-
-                # Cleanup files
-                try:
-                    upload_client.files.delete(name=q_file.name)
-                    upload_client.files.delete(name=a_file.name)
-                except: pass
                 break # Success, move to next chunk
-                
+
             except Exception as e:
                 err = str(e)
-                try:
-                    upload_client.files.delete(name=q_file.name)
-                    upload_client.files.delete(name=a_file.name)
-                except: pass
                 if "FIXED_CLIENT_EXHAUSTED" in err:
                     print(f"[Process] Key exhausted, retrying chunk...")
                     continue
                 print(f"[Process] Chunk Error: {err}")
                 if attempt == max_full_retries - 1:
                     print(f"[Process] Skipping chunk {start_pg}-{end_pg} after max retries.")
+            finally:
+                try:
+                    if q_file: upload_client.files.delete(name=q_file.name)
+                    if a_file: upload_client.files.delete(name=a_file.name)
+                except Exception as e:
+                    print(f"[Warn] Failed to delete Gemini files: {e}")
+
+    # Deduplicate questions by ID
+    unique_qs = {}
+    for q in all_questions:
+        qid = q.get('id')
+        if qid not in unique_qs:
+            unique_qs[qid] = q
+    all_questions = list(unique_qs.values())
 
     # Combine all chunks
     final_data = test_metadata or {"test_name": "Extracted Test", "subjects": [], "duration_minutes": 180}
@@ -363,7 +373,7 @@ def _check_answer(user_ans, correct_ans, q_type):
 login_manager = LoginManager()
 login_manager.init_app(app)
 login_manager.login_view = 'login_page'
-app.secret_key = os.environ.get('SECRET_KEY', 'dev-secret-change-in-production-1234')
+app.secret_key = os.environ.get('SECRET_KEY', os.urandom(24))
 
 class User(UserMixin):
     def __init__(self, user_dict):
@@ -454,6 +464,19 @@ def process_pdfs():
     a_path = os.path.join(UPLOAD_DIR, f"{test_id}_a.pdf")
     q_file.save(q_path)
     a_file.save(a_path)
+
+    valid = True
+    with open(q_path, 'rb') as f:
+        if f.read(4) != b'%PDF': valid = False
+    with open(a_path, 'rb') as f:
+        if f.read(4) != b'%PDF': valid = False
+
+    if not valid:
+        try:
+            os.remove(q_path)
+            os.remove(a_path)
+        except Exception: pass
+        return jsonify({"error": "One or both files are not valid PDFs (corrupted or renamed)"}), 400
 
     try:
         # Step 1: Extract individual images from question paper PDF
@@ -572,8 +595,9 @@ def review_page(test_id):
 
 
 @app.route('/api/review/<test_id>')
+@login_required
 def get_review_data(test_id):
-    test = database.get_test(test_id)
+    test = database.get_test(test_id, current_user.id)
     if not test:
         return jsonify({'error': 'Not found'}), 404
     all_qs = []
@@ -597,8 +621,12 @@ def get_review_data(test_id):
 
 
 @app.route('/api/crop/<test_id>/<int:q_id>', methods=['POST'])
+@login_required
 def update_crop(test_id, q_id):
     """Accept manual crop coordinates from the review tool and re-crop."""
+    if not re.match(r'^[a-zA-Z0-9_-]{4,16}$', test_id):
+        return jsonify({'error': 'Invalid test ID'}), 400
+
     data = request.json
     x1, y1, x2, y2 = int(data['x1']), int(data['y1']), int(data['x2']), int(data['y2'])
     page_num = data['page_number']
@@ -623,75 +651,85 @@ def update_crop(test_id, q_id):
         cropped.save(os.path.join(img_dir, fname))
 
         # Update the stored test data
-        test = database.get_test(test_id)
+        test = database.get_test(test_id, current_user.id)
+        if not test: return jsonify({'error': 'Not found'}), 404
         for q in test.get('questions', []):
             if q['id'] == q_id:
                 q['diagram_crop'] = fname
                 break
-        database.save_test(test_id, test.get('test_name', 'Test'), test)
+        database.save_test(test_id, test.get('test_name', 'Test'), test, current_user.id)
         return jsonify({'success': True, 'diagram_crop': fname, 'cache_bust': str(uuid.uuid4())[:8]})
     except Exception as e:
+        print(f"[Warn] Crop error: {e}")
         return jsonify({'error': str(e)}), 500
 
 
 @app.route('/api/crop/<test_id>/<int:q_id>', methods=['DELETE'])
+@login_required
 def remove_crop(test_id, q_id):
     """Remove a diagram from a question."""
+    if not re.match(r'^[a-zA-Z0-9_-]{4,16}$', test_id):
+        return jsonify({'error': 'Invalid test ID'}), 400
+
     img_dir = os.path.join(app.root_path, 'static', 'test_images', test_id)
     fname = f'q{q_id}_diagram.png'
     fpath = os.path.join(img_dir, fname)
     try:
         if os.path.exists(fpath):
             os.remove(fpath)
-    except Exception:
-        pass
-    test = database.get_test(test_id)
+    except Exception as e:
+        print(f"[Warn] Failed to remove crop image: {e}")
+    test = database.get_test(test_id, current_user.id)
     if test:
         for q in test.get('questions', []):
             if q['id'] == q_id:
                 q['diagram_crop'] = None
                 q['has_diagram'] = False
                 break
-        database.save_test(test_id, test.get('test_name', 'Test'), test)
+        database.save_test(test_id, test.get('test_name', 'Test'), test, current_user.id)
     return jsonify({'success': True})
 
 
 @app.route('/api/test/<test_id>', methods=['PATCH'])
+@login_required
 def rename_test(test_id):
     """Rename a test."""
     data = request.json
     new_name = (data.get('name') or '').strip()
     if not new_name:
         return jsonify({'error': 'Name cannot be empty'}), 400
-    test = database.get_test(test_id)
+    test = database.get_test(test_id, current_user.id)
     if not test:
         return jsonify({'error': 'Not found'}), 404
     test['test_name'] = new_name
-    database.save_test(test_id, new_name, test)
+    database.save_test(test_id, new_name, test, current_user.id)
     return jsonify({'success': True, 'name': new_name})
 
 
 @app.route('/api/finalize/<test_id>', methods=['POST'])
+@login_required
 def finalize_test(test_id):
     """Mark a draft test as ready to take."""
-    test = database.get_test(test_id)
+    test = database.get_test(test_id, current_user.id)
     if not test:
         return jsonify({'error': 'Not found'}), 404
     test['status'] = 'ready'
-    database.save_test(test_id, test.get('test_name', 'Test'), test)
+    database.save_test(test_id, test.get('test_name', 'Test'), test, current_user.id)
     return jsonify({'success': True, 'test_url': f'/test/{test_id}'})
 
 
 @app.route('/test/<test_id>')
+@login_required
 def test_page(test_id):
-    if not database.get_test(test_id):
+    if not database.get_test(test_id, current_user.id):
         return redirect(url_for('index'))
     return render_template('test.html', test_id=test_id)
 
 
 @app.route('/api/test/<test_id>')
+@login_required
 def get_test_data(test_id):
-    test = database.get_test(test_id)
+    test = database.get_test(test_id, current_user.id)
     if not test:
         return jsonify({"error": "Not found"}), 404
     # Strip correct answers, keep diagram info
@@ -713,7 +751,7 @@ def submit_test():
     user_answers = data.get('answers', {})
     time_taken = data.get('time_taken_seconds', 0)
 
-    test = database.get_test(test_id)
+    test = database.get_test(test_id, current_user.id)
     if not test:
         return jsonify({"error": "Not found"}), 404
 
@@ -783,15 +821,17 @@ def submit_test():
 
 
 @app.route('/result/<result_id>')
+@login_required
 def result_page(result_id):
-    if not database.get_attempt(result_id):
+    if not database.get_attempt(result_id, current_user.id):
         return redirect(url_for('index'))
     return render_template('result.html', result_id=result_id)
 
 
 @app.route('/api/result/<result_id>')
+@login_required
 def get_result_data(result_id):
-    attempt = database.get_attempt(result_id)
+    attempt = database.get_attempt(result_id, current_user.id)
     if not attempt:
         return jsonify({"error": "Not found"}), 404
     return jsonify(attempt)
@@ -857,15 +897,24 @@ def import_data():
         
         imported_tests = 0
         imported_attempts = 0
+        test_id_map = {}
         
         for t in data.get('tests', []):
             if t and 'test_id' in t:
-                database.save_test(t['test_id'], t.get('test_name', 'Imported Test'), t, current_user.id)
+                old_id = t['test_id']
+                new_id = str(uuid.uuid4())[:8]
+                t['test_id'] = new_id
+                test_id_map[old_id] = new_id
+                database.save_test(new_id, t.get('test_name', 'Imported Test'), t, current_user.id)
                 imported_tests += 1
                 
         for a in data.get('attempts', []):
             if a and 'result_id' in a and 'test_id' in a:
-                database.save_attempt(a['result_id'], a['test_id'], a.get('test_name', 'Imported'),
+                new_result_id = str(uuid.uuid4())[:8]
+                a['result_id'] = new_result_id
+                if a['test_id'] in test_id_map:
+                    a['test_id'] = test_id_map[a['test_id']]
+                database.save_attempt(new_result_id, a['test_id'], a.get('test_name', 'Imported'),
                                       a.get('total_score', 0), a.get('max_score', 0), a, current_user.id)
                 imported_attempts += 1
                 

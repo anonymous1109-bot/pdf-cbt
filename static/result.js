@@ -187,6 +187,7 @@ function renderQuestionReview() {
         </div>`;
     }).join('');
 
+    mathRetries = 0;
     renderMathResult();
 }
 
