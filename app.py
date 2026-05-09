@@ -193,103 +193,105 @@ def extract_images_from_pdf(pdf_path, test_id):
 # GEMINI: Extract questions from PDFs
 # ======================================================================
 # ======================================================================
-def extract_questions_from_pdfs(q_path, a_path, test_id, image_info, max_full_retries=4):
-    """Upload PDFs to Gemini and extract structured questions with diagram mapping."""
-    for attempt in range(max_full_retries):
-        upload_client = _get_client()
-        _rate_limit_wait()
+def extract_questions_from_pdfs(q_path, a_path, test_id, image_info, max_full_retries=3):
+    """Upload PDFs to Gemini and extract structured questions in chunks to avoid token limits."""
+    import fitz
+    doc = fitz.open(q_path)
+    total_pages = len(doc)
+    doc.close()
 
-        q_file = upload_client.files.upload(file=q_path)
-        a_file = upload_client.files.upload(file=a_path)
+    all_questions = []
+    test_metadata = {}
+    
+    # Process in chunks of 3 pages to ensure high detail and no skipped questions
+    chunk_size = 3
+    for start_pg in range(1, total_pages + 1, chunk_size):
+        end_pg = min(start_pg + chunk_size - 1, total_pages)
+        print(f"[Process] Analyzing pages {start_pg} to {end_pg}...")
+        
+        for attempt in range(max_full_retries):
+            upload_client = _get_client()
+            _rate_limit_wait()
 
-        for f in [q_file, a_file]:
-            while f.state.name == "PROCESSING":
-                time.sleep(2)
-                f = upload_client.files.get(name=f.name)
+            q_file = upload_client.files.upload(file=q_path)
+            a_file = upload_client.files.upload(file=a_path)
 
-        # Build image info for the prompt
-        img_summary = f"I extracted {len(image_info)} images from the question paper PDF in order of appearance (indexed 0 to {len(image_info)-1})."
-        per_page = {}
-        for img in image_info:
-            pg = img['page']
-            if pg not in per_page:
-                per_page[pg] = []
-            per_page[pg].append(img['index'])
-        for pg in sorted(per_page.keys()):
-            img_summary += f"\n  Page {pg}: image indices {per_page[pg]}"
+            for f in [q_file, a_file]:
+                while f.state.name == "PROCESSING":
+                    time.sleep(2)
+                    f = upload_client.files.get(name=f.name)
 
-        prompt = f"""You are a JEE/NEET exam paper analyzer. I'm giving you two PDFs:
-1. FIRST PDF: The Question Paper  
-2. SECOND PDF: The Answer Key
- 
-{img_summary}
+            img_summary = f"I extracted {len(image_info)} images from the question paper PDF."
+            
+            prompt = f"""You are a JEE/NEET exam paper analyzer. I'm giving you two PDFs.
+FOCUS ONLY ON QUESTIONS LOCATED ON PAGES {start_pg} TO {end_pg} of the Question Paper.
 
-Extract ALL questions and match with correct answers. Return ONLY valid JSON:
+Extract ALL questions from these specific pages and match them with answers from the Answer Key.
+Return ONLY valid JSON:
 {{
-  "test_name": "Name of test",
-  "total_questions": <number>,
+  "test_name": "Name of test (if found)",
   "subjects": ["Physics", "Chemistry", "Mathematics"],
-  "duration_minutes": 180,
   "questions": [
     {{
-      "id": 1,
-      "subject": "Physics",
-      "topic": "Electrostatics",
-      "text": "Question stem ONLY — no options here.",
+      "id": <original_question_number>,
+      "subject": "Physics/Chemistry/Mathematics",
+      "topic": "Topic Name",
+      "text": "Question stem ONLY.",
       "type": "MCQ_SINGLE",
-      "options": {{"A": "option A", "B": "option B", "C": "option C", "D": "option D"}},
+      "options": {{"A": "...", "B": "...", "C": "...", "D": "..."}},
       "correct_answer": "B",
-      "marks_correct": 4,
-      "marks_incorrect": -1,
-      "page_number": 1,
+      "page_number": <page_in_pdf>,
       "has_diagram": true,
-      "diagram_bbox": [320, 150, 560, 850]
+      "diagram_bbox": [ymin, xmin, ymax, xmax]
     }}
   ]
 }}
 
 CRITICAL RULES:
-- "type": "MCQ_SINGLE", "MCQ_MULTI", or "INTEGER"
-- MCQ_SINGLE: correct_answer = single letter. MCQ_MULTI: comma-separated. INTEGER: numerical string, options=null.
-- "page_number": page in question paper (1-indexed)
-- !!!CRITICAL OPTIONS RULE!!!: The options/choices (e.g. (1)...(2)... or (A)...(B)...) must NEVER appear in the "text" field. The "text" field contains ONLY the question stem. Parse ALL options ONLY into the "options" dict with keys A, B, C, D.
-- "has_diagram": true ONLY if there is an actual figure, graph, circuit diagram, or scientific illustration that is part of the question. Logos, watermarks, and page decorations are NOT diagrams.
-- "diagram_bbox": REQUIRED whenever has_diagram is true. Provide the bounding box of ONLY the actual diagram/figure (NOT the question text, NOT the options, NOT logos) as [ymin, xmin, ymax, xmax] in normalized 0-1000 scale relative to the full page. The ymin value must be BELOW all question text — start the box from the very top edge of the drawn figure/illustration itself. Be tight and precise.
-- Preserve ALL math as LaTeX ($...$)
-- Extract EVERY question
-- MARKING: marks_correct=4, marks_incorrect=-1 for ALL types"""
+1. ONLY extract questions that physically start on pages {start_pg} through {end_pg}.
+2. "has_diagram": Set to true for ANY question that has a figure, graph, circuit, or drawing nearby. 
+3. "diagram_bbox": If has_diagram is true, provide the [ymin, xmin, ymax, xmax] coordinates (0-1000) of the figure on that page.
+4. If a question is an INTEGER type, set options to null.
+5. Match the question number accurately with the answer key."""
 
-        try:
-            text = _call_gemini([prompt, q_file, a_file], client=upload_client)
-            
             try:
+                text = _call_gemini([prompt, q_file, a_file], client=upload_client)
                 data = _parse_json(text)
-            except Exception as e:
-                print(f"Error parsing Gemini response: {e}")
-                data = json.loads(text)
-
-            try:
-                upload_client.files.delete(name=q_file.name)
-                upload_client.files.delete(name=a_file.name)
-            except:
-                pass
-
-            return data
-            
-        except Exception as e:
-            err = str(e)
-            try:
-                upload_client.files.delete(name=q_file.name)
-                upload_client.files.delete(name=a_file.name)
-            except:
-                pass
                 
-            if "FIXED_CLIENT_EXHAUSTED" in err:
-                print(f"[Process] Key exhausted during extraction! Deleting files and retrying with next key... ({attempt+1}/{max_full_retries})")
-                continue
-            raise e
-            
-    raise Exception("All API keys exhausted or failed during extraction.")
+                if 'questions' in data:
+                    all_questions.extend(data['questions'])
+                if not test_metadata and 'test_name' in data:
+                    test_metadata = {
+                        'test_name': data.get('test_name', 'Unnamed Test'),
+                        'subjects': data.get('subjects', []),
+                        'duration_minutes': data.get('duration_minutes', 180)
+                    }
+
+                # Cleanup files
+                try:
+                    upload_client.files.delete(name=q_file.name)
+                    upload_client.files.delete(name=a_file.name)
+                except: pass
+                break # Success, move to next chunk
+                
+            except Exception as e:
+                err = str(e)
+                try:
+                    upload_client.files.delete(name=q_file.name)
+                    upload_client.files.delete(name=a_file.name)
+                except: pass
+                if "FIXED_CLIENT_EXHAUSTED" in err:
+                    print(f"[Process] Key exhausted, retrying chunk...")
+                    continue
+                print(f"[Process] Chunk Error: {err}")
+                if attempt == max_full_retries - 1:
+                    print(f"[Process] Skipping chunk {start_pg}-{end_pg} after max retries.")
+
+    # Combine all chunks
+    final_data = test_metadata or {"test_name": "Extracted Test", "subjects": [], "duration_minutes": 180}
+    final_data['questions'] = sorted(all_questions, key=lambda x: int(x.get('id', 0)))
+    final_data['total_questions'] = len(all_questions)
+    return final_data
 
 
 def analyze_concepts(wrong_questions, all_questions):
