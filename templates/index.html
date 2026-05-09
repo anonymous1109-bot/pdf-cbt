@@ -134,6 +134,22 @@
         <div class="processing-sub" id="processingStatus">Uploading PDFs to Gemini</div>
     </div>
 
+    <!-- Setup Modal -->
+    <div class="modal-overlay" id="setupModal">
+        <div class="modal">
+            <h3>Configure Your Test</h3>
+            <p style="color:var(--text-muted); margin-bottom: 1rem;">Set the duration for your mock test.</p>
+            <div style="margin-bottom: 1.5rem;">
+                <label style="display:block; margin-bottom:0.5rem; font-weight:600;">Test Duration (Minutes):</label>
+                <input type="number" id="customDuration" value="180" min="10" max="360" style="width: 100%; padding: 0.5rem; border-radius: 4px; border: 1px solid var(--border); background: var(--bg-card); color: var(--text-primary); font-size: 1rem;">
+            </div>
+            <div style="display:flex; gap: 0.5rem; justify-content: flex-end;">
+                <button class="btn btn-outline" onclick="closeSetupModal()">Cancel</button>
+                <button class="btn btn-primary" onclick="startCustomTest()">Start Exam</button>
+            </div>
+        </div>
+    </div>
+
     <script>
         // ─── Tab switching ───────────────────────────────────────────────
         function switchTab(name) {
@@ -211,7 +227,7 @@
                         <div class="test-card-actions">
                             ${isDraft
                                 ? `<a class="btn-review-link" href="/review/${t.id}">✂️ Review</a>`
-                                : `<button class="btn-take" onclick="window.location.href='/test/${t.id}'">▶ Take Test</button>`
+                                : `<button class="btn-take" onclick="openSetupModal('${t.id}', ${t.duration_minutes || 180})">▶ Take Test</button>`
                             }
                             <button class="btn-rename" onclick="renameTest('${t.id}', event)" title="Rename">✏️</button>
                             <button class="btn-del" onclick="deleteTest('${t.id}', event)" title="Delete">🗑</button>
@@ -405,6 +421,38 @@
                 processing.classList.remove('active');
             }
         });
+
+        let currentLaunchTestId = null;
+
+        function openSetupModal(testId, defaultDuration) {
+            currentLaunchTestId = testId;
+            document.getElementById('customDuration').value = defaultDuration || 180;
+            document.getElementById('setupModal').classList.add('active');
+        }
+
+        function closeSetupModal() {
+            document.getElementById('setupModal').classList.remove('active');
+            currentLaunchTestId = null;
+        }
+
+        async function startCustomTest() {
+            if (!currentLaunchTestId) return;
+            const duration = document.getElementById('customDuration').value;
+            
+            try {
+                // Save the new duration to the backend
+                await fetch(`/api/test/${currentLaunchTestId}/duration`, {
+                    method: 'PATCH',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ duration_minutes: duration })
+                });
+            } catch (e) {
+                console.error("Failed to update duration", e);
+            }
+
+            // Redirect to the test page
+            window.location.href = `/test/${currentLaunchTestId}`;
+        }
 
         // ─── Init ────────────────────────────────────────────────────────
         loadDashboard();

@@ -60,13 +60,13 @@ def _rate_limit_wait():
         elapsed = now - _last_request_time
         if elapsed < REQUEST_DELAY:
             wait = REQUEST_DELAY - elapsed
-            _last_request_time = now + wait
-        else:
-            _last_request_time = now
             
     if wait > 0:
         print(f"[RateLimit] Waiting {wait:.1f}s before next request")
         time.sleep(wait)
+        
+    with _rate_lock:
+        _last_request_time = time.time()
 
 
 class QuestionSchema(BaseModel):
@@ -186,8 +186,9 @@ def extract_images_from_pdf(pdf_path, test_id):
     doc = fitz.open(pdf_path)
     extracted = []
     global_idx = 0
+    max_pages = min(len(doc), 120)
 
-    for page_num in range(len(doc)):
+    for page_num in range(max_pages):
         page = doc[page_num]
         image_list = page.get_images(full=True)
 
@@ -226,7 +227,7 @@ def extract_questions_from_pdfs(q_path, a_path, test_id, image_info, max_full_re
     """Upload PDFs to Gemini and extract structured questions in chunks to avoid token limits."""
     import fitz
     doc = fitz.open(q_path)
-    total_pages = len(doc)
+    total_pages = min(len(doc), 120)  # Hard limit to prevent RAM DOS on huge modules
     doc.close()
 
     all_questions = []
@@ -268,10 +269,20 @@ CRITICAL RULES:
 
                 try:
                     text = _call_gemini([prompt, q_file, a_file], client=upload_client, response_schema=TestSchema)
-                    data = json.loads(text)
+                    parsed = TestSchema.model_validate_json(text)
+                    data = parsed.model_dump()
                     
-                    if 'questions' in data:
-                        all_questions.extend(data['questions'])
+                    # Sanity check validation
+                    valid_questions = []
+                    for q in data.get('questions', []):
+                        if q.get('type') == 'MCQ_SINGLE':
+                            opts = q.get('options')
+                            if not opts or len(opts) != 4:
+                                continue  # Reject malformed MCQ
+                        valid_questions.append(q)
+                    
+                    if valid_questions:
+                        all_questions.extend(valid_questions)
                     if not test_metadata and 'test_name' in data:
                         test_metadata = {
                             'test_name': data.get('test_name', 'Unnamed Test'),
@@ -339,28 +350,14 @@ def analyze_concepts(wrong_questions, all_questions):
     prompt = f"""You are a JEE/NEET mentor. Analyze these wrong/unattempted answers:
 {json.dumps(wrong_details, indent=2)}
 
-Return ONLY valid JSON:
-{{
-  "summary": "2-3 sentence overview",
-  "subject_analysis": {{
-    "Physics": {{
-      "score_comment": "Performance summary",
-      "weak_topics": ["topic1"],
-      "strong_topics": ["topic2"],
-      "key_gaps": "What concepts need work"
-    }}
-  }},
-  "recommendations": ["actionable tip 1", "actionable tip 2", "actionable tip 3"],
-  "priority_topics": [
-    {{"topic": "Name", "subject": "Subject", "reason": "Why", "study_plan": "How to improve"}}
-  ],
-  "common_mistakes": ["pattern 1", "pattern 2"]
-}}
-
 Be specific, encouraging, and actionable."""
-
-    text = _call_gemini(prompt, response_schema=AnalysisSchema)
-    return json.loads(text)
+    try:
+        text = _call_gemini(prompt, response_schema=AnalysisSchema)
+        parsed = AnalysisSchema.model_validate_json(text)
+        return parsed.model_dump()
+    except Exception as e:
+        print(f"[Analysis] Error: {e}")
+        return {"summary": "Analysis failed.", "subject_analysis": {}, "recommendations": [], "priority_topics": [], "common_mistakes": []}
 
 
 def _check_answer(user_ans, correct_ans, q_type):
@@ -559,11 +556,27 @@ def _background_process_pdfs(q_path, a_path, test_id, user_id):
         error_msg = str(e)
         if 'quota' in error_msg.lower() or '429' in error_msg or 'exhausted' in error_msg.lower():
             error_msg = ("⚠️ All API keys exhausted! Please wait a few minutes for quota reset.")
+        else:
+            error_msg = ("⚠️ Internal server error during processing. Please try again later.")
         database.save_test(test_id, "Error", {"status": "error", "error": error_msg}, user_id)
     finally:
         for p in [q_path, a_path]:
             try: os.remove(p)
             except: pass
+
+@app.route('/api/test/<test_id>/duration', methods=['PATCH'])
+@login_required
+def update_duration(test_id):
+    data = request.get_json(silent=True) or {}
+    new_duration = int(data.get('duration_minutes', 180))
+    
+    test = database.get_test(test_id, current_user.id)
+    if not test:
+        return jsonify({'error': 'Not found'}), 404
+        
+    test['duration_minutes'] = new_duration
+    database.save_test(test_id, test.get('test_name', 'Test'), test, current_user.id)
+    return jsonify({'success': True, 'duration_minutes': new_duration})
 
 @app.route('/api/process_status/<test_id>')
 @login_required
@@ -659,24 +672,44 @@ def get_review_data(test_id):
     })
 
 
-@app.route('/api/crop/<test_id>/<int:q_id>', methods=['POST'])
+@app.route('/api/crop/<test_id>/<int:q_id>', methods=['POST', 'DELETE'])
 @login_required
-def update_crop(test_id, q_id):
-    """Accept manual crop coordinates from the review tool and re-crop."""
+def manage_crop(test_id, q_id):
+    """Handle POST (crop) and DELETE (remove) for a specific question diagram."""
     if not re.match(r'^[a-zA-Z0-9_-]{4,16}$', test_id):
         return jsonify({'error': 'Invalid test ID'}), 400
 
+    test = database.get_test(test_id, current_user.id)
+    if not test: return jsonify({'error': 'Not found'}), 404
+
+    q = next((q for q in test.get('questions', []) if str(q['id']) == str(q_id)), None)
+    if not q: return jsonify({'error': 'Question not found'}), 404
+
+    img_dir = os.path.join(IMAGE_DIR, test_id)
+    fname = f'q{q_id}_diagram.png'
+    fpath = os.path.join(img_dir, fname)
+
+    if request.method == 'DELETE':
+        try:
+            if os.path.exists(fpath): os.remove(fpath)
+        except Exception as e:
+            print(f"[Warn] Failed to remove crop image: {e}")
+        q['diagram_crop'] = None
+        q['has_diagram'] = False
+        database.save_test(test_id, test.get('test_name', 'Test'), test, current_user.id)
+        return jsonify({'success': True})
+
     data = request.get_json(silent=True) or {}
+    if 'x1' not in data: return jsonify({'error': 'Missing coords'}), 400
     x1, y1, x2, y2 = int(data['x1']), int(data['y1']), int(data['x2']), int(data['y2'])
     page_num = data['page_number']
 
-    img_dir = os.path.join(IMAGE_DIR, test_id)
     page_path = os.path.join(img_dir, f'page_{page_num}.png')
     if not os.path.exists(page_path):
         return jsonify({'error': 'Page image not found'}), 404
 
+    from PIL import Image as PILImage
     try:
-        from PIL import Image as PILImage
         img = PILImage.open(page_path)
         W, H = img.size
         left   = max(0, min(x1, x2))
@@ -686,46 +719,33 @@ def update_crop(test_id, q_id):
         if right <= left or bottom <= top:
             return jsonify({'error': 'Invalid crop region'}), 400
         cropped = img.crop((left, top, right, bottom))
-        fname = f'q{q_id}_diagram.png'
-        cropped.save(os.path.join(img_dir, fname))
-
-        # Update the stored test data
-        test = database.get_test(test_id, current_user.id)
-        if not test: return jsonify({'error': 'Not found'}), 404
-        for q in test.get('questions', []):
-            if q['id'] == q_id:
-                q['diagram_crop'] = fname
-                break
+        cropped.save(fpath)
+        q['diagram_crop'] = fname
+        q['has_diagram'] = True
         database.save_test(test_id, test.get('test_name', 'Test'), test, current_user.id)
         return jsonify({'success': True, 'diagram_crop': fname, 'cache_bust': str(uuid.uuid4())[:8]})
     except Exception as e:
         print(f"[Warn] Crop error: {e}")
         return jsonify({'error': str(e)}), 500
 
-
-@app.route('/api/crop/<test_id>/<int:q_id>', methods=['DELETE'])
+@app.route('/api/question/<test_id>/<int:q_id>', methods=['PUT'])
 @login_required
-def remove_crop(test_id, q_id):
-    """Remove a diagram from a question."""
-    if not re.match(r'^[a-zA-Z0-9_-]{4,16}$', test_id):
-        return jsonify({'error': 'Invalid test ID'}), 400
+def update_question(test_id, q_id):
+    """Manually correct OCR mistakes or malformed questions."""
+    test_data = database.get_test(test_id, current_user.id)
+    if not test_data: return jsonify({'error': 'Not found'}), 404
 
-    img_dir = os.path.join(IMAGE_DIR, test_id)
-    fname = f'q{q_id}_diagram.png'
-    fpath = os.path.join(img_dir, fname)
-    try:
-        if os.path.exists(fpath):
-            os.remove(fpath)
-    except Exception as e:
-        print(f"[Warn] Failed to remove crop image: {e}")
-    test = database.get_test(test_id, current_user.id)
-    if test:
-        for q in test.get('questions', []):
-            if q['id'] == q_id:
-                q['diagram_crop'] = None
-                q['has_diagram'] = False
-                break
-        database.save_test(test_id, test.get('test_name', 'Test'), test, current_user.id)
+    q = next((q for q in test_data.get('questions', []) if str(q['id']) == str(q_id)), None)
+    if not q: return jsonify({'error': 'Question not found'}), 404
+
+    data = request.get_json(silent=True) or {}
+    q['text'] = data.get('text', q['text'])
+    q['correct_answer'] = data.get('correct_answer', q['correct_answer'])
+    
+    if q['type'] == 'MCQ_SINGLE':
+        q['options'] = data.get('options', q['options'])
+        
+    database.save_test(test_id, test_data.get('test_name', 'Test'), test_data, current_user.id)
     return jsonify({'success': True})
 
 

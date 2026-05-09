@@ -95,6 +95,32 @@
         <button class="btn-finalize" id="finalizeBtn" onclick="finalizeTest()">🚀 Create Test →</button>
     </div>
 
+    <!-- Edit Overlay -->
+    <div class="crop-overlay" id="editOverlay" style="align-items:center; justify-content:center;">
+        <div class="modal" style="width: 600px; max-width:90%; background:var(--bg-card); display:flex; flex-direction:column; gap:1rem; padding: 1.5rem; border-radius:var(--radius-lg); border:1px solid var(--border);">
+            <h3 id="editTitle" style="margin:0; font-size:1.1rem; font-weight:700;">Edit Question</h3>
+            <textarea id="editQText" rows="5" style="width:100%; padding:0.5rem; background:var(--bg-glass); color:var(--text-primary); border:1px solid var(--border); border-radius:4px; font-family:inherit; resize:vertical;"></textarea>
+            
+            <div id="editOptionsDiv" style="display:none; flex-direction:column; gap:0.5rem;">
+                <label style="font-size:0.85rem; font-weight:600; color:var(--text-secondary);">Options:</label>
+                <input type="text" id="editOptA" placeholder="Option A" style="padding:0.4rem; background:var(--bg-glass); color:var(--text-primary); border:1px solid var(--border); border-radius:4px;">
+                <input type="text" id="editOptB" placeholder="Option B" style="padding:0.4rem; background:var(--bg-glass); color:var(--text-primary); border:1px solid var(--border); border-radius:4px;">
+                <input type="text" id="editOptC" placeholder="Option C" style="padding:0.4rem; background:var(--bg-glass); color:var(--text-primary); border:1px solid var(--border); border-radius:4px;">
+                <input type="text" id="editOptD" placeholder="Option D" style="padding:0.4rem; background:var(--bg-glass); color:var(--text-primary); border:1px solid var(--border); border-radius:4px;">
+            </div>
+
+            <div>
+                <label style="font-size:0.85rem; font-weight:600; color:var(--text-secondary); display:block; margin-bottom:0.2rem;">Correct Answer:</label>
+                <input type="text" id="editCorrect" style="width:100%; padding:0.4rem; background:var(--bg-glass); color:var(--text-primary); border:1px solid var(--border); border-radius:4px;">
+            </div>
+            
+            <div style="display:flex; gap:0.5rem; justify-content:flex-end; margin-top:0.5rem;">
+                <button class="btn-cancel-c" onclick="closeEdit()">Cancel</button>
+                <button class="btn-apply" id="saveEditBtn" onclick="saveEdit()">Save Changes</button>
+            </div>
+        </div>
+    </div>
+
     <!-- Crop Overlay -->
     <div class="crop-overlay" id="cropOverlay">
         <div class="crop-toolbar">
@@ -203,6 +229,7 @@ function renderList() {
                 <div class="q-text">${q.text}</div>
                 <div class="q-actions">
                     <button class="btn-xs" onclick="openCrop(${q.id})">✂️ ${hasCrop ? 'Re-crop' : 'Add Diagram'}</button>
+                    <button class="btn-xs" onclick="openEdit(${q.id})">✏️ Edit Text</button>
                     ${hasCrop ? `<button class="btn-xs danger" onclick="removeDiagram(${q.id})">🗑 Remove Diagram</button>` : ''}
                     <button class="btn-xs success ${ok?'active':''}" onclick="toggleConfirm(${q.id})">${ok ? '✓ Confirmed' : 'Confirm ✓'}</button>
                 </div>
@@ -232,6 +259,78 @@ async function finalizeTest() {
     const d = await res.json();
     if (d.success) window.location.href = d.test_url;
     else { alert(d.error); document.getElementById('finalizeBtn').textContent = '🚀 Create Test →'; document.getElementById('finalizeBtn').disabled = false; }
+}
+
+// ── Edit Tool ───────────────────────────────────────────────────────────
+let editQ = null;
+
+function openEdit(qId) {
+    editQ = reviewData.questions.find(q => q.id === qId);
+    if (!editQ) return;
+    
+    document.getElementById('editTitle').textContent = `Edit Q${qId}`;
+    document.getElementById('editQText').value = editQ.text || '';
+    
+    if (editQ.type === 'MCQ_SINGLE' && editQ.options) {
+        document.getElementById('editOptionsDiv').style.display = 'flex';
+        document.getElementById('editOptA').value = editQ.options.A || '';
+        document.getElementById('editOptB').value = editQ.options.B || '';
+        document.getElementById('editOptC').value = editQ.options.C || '';
+        document.getElementById('editOptD').value = editQ.options.D || '';
+    } else {
+        document.getElementById('editOptionsDiv').style.display = 'none';
+    }
+    
+    document.getElementById('editCorrect').value = editQ.correct_answer || '';
+    document.getElementById('editOverlay').classList.add('active');
+}
+
+function closeEdit() {
+    document.getElementById('editOverlay').classList.remove('active');
+    editQ = null;
+}
+
+async function saveEdit() {
+    if (!editQ) return;
+    document.getElementById('saveEditBtn').textContent = 'Saving...';
+    document.getElementById('saveEditBtn').disabled = true;
+    
+    const data = {
+        text: document.getElementById('editQText').value,
+        correct_answer: document.getElementById('editCorrect').value
+    };
+    
+    if (editQ.type === 'MCQ_SINGLE') {
+        data.options = {
+            A: document.getElementById('editOptA').value,
+            B: document.getElementById('editOptB').value,
+            C: document.getElementById('editOptC').value,
+            D: document.getElementById('editOptD').value
+        };
+    }
+    
+    try {
+        const res = await fetch(`/api/question/${TEST_ID}/${editQ.id}`, {
+            method: 'PUT',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(data)
+        });
+        const resData = await res.json();
+        if (resData.success) {
+            editQ.text = data.text;
+            editQ.correct_answer = data.correct_answer;
+            if (data.options) editQ.options = data.options;
+            renderList();
+            closeEdit();
+        } else {
+            alert('Error: ' + resData.error);
+        }
+    } catch (e) {
+        alert('Network error');
+    }
+    
+    document.getElementById('saveEditBtn').textContent = 'Save Changes';
+    document.getElementById('saveEditBtn').disabled = false;
 }
 
 // ── Crop Tool ───────────────────────────────────────────────────────────

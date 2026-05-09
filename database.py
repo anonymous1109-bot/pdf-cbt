@@ -147,7 +147,8 @@ def get_all_tests(user_id=None):
             'name': r['name'],
             'created_at': r['created_at'],
             'status': data.get('status', 'ready'),
-            'total_questions': data.get('total_questions') or len(data.get('questions', []))
+            'total_questions': data.get('total_questions') or len(data.get('questions', [])),
+            'duration_minutes': data.get('duration_minutes', 180)
         })
     return results
 
