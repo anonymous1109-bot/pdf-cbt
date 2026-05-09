@@ -96,16 +96,19 @@ function showQuestion(idx) {
     const subjClass = (q.subject || '').toLowerCase();
     const qType = q.type || 'MCQ_SINGLE';
 
-    // Diagram — show only the precisely cropped region (no full-page dumps)
+    // Diagram — show only the precisely cropped region; click to enlarge
     let diagramHTML = '';
     if (q.has_diagram && q.diagram_crop) {
+        const imgSrc = q.diagram_crop.startsWith('data:') ? q.diagram_crop : `/test_images/${testData.test_id}/${q.diagram_crop}`;
         diagramHTML = `<div class="diagram-section">
-            <img src="${q.diagram_crop.startsWith('data:') ? q.diagram_crop : `/test_images/${testData.test_id}/${q.diagram_crop}`}" 
+            <img src="${imgSrc}" 
                  alt="Figure for Q${q.id}" class="diagram-img"
+                 onclick="openDiagramLightbox('${imgSrc.replace(/'/g, "&apos;")}')"
+                 title="Click to zoom"
                  onerror="this.parentElement.style.display='none'">
+            <div class="diagram-zoom-hint">🔍 Click to zoom</div>
         </div>`;
     }
-
 
     // Type badge
     let typeBadge = '';
@@ -326,4 +329,49 @@ function renderMath() {
     } else if (mathRetries++ < 20) {
         setTimeout(renderMath, 200);
     }
+}
+
+// ── Diagram Lightbox / Zoom ──────────────────────────────────────────────
+function openDiagramLightbox(src) {
+    let overlay = document.getElementById('diagramLightbox');
+    if (!overlay) {
+        overlay = document.createElement('div');
+        overlay.id = 'diagramLightbox';
+        overlay.style.cssText = `
+            position:fixed; inset:0; z-index:9999;
+            background:rgba(0,0,0,0.88);
+            display:flex; flex-direction:column;
+            align-items:center; justify-content:center; gap:1rem;
+            cursor:zoom-out;
+        `;
+        overlay.innerHTML = `
+            <div style="display:flex;align-items:center;gap:0.75rem;background:rgba(255,255,255,0.08);padding:0.5rem 1rem;border-radius:9999px;cursor:default;" onclick="event.stopPropagation()">
+                <span style="color:#aaa;font-size:0.8rem;">🔍 Resize:</span>
+                <input id="lbSlider" type="range" min="20" max="100" value="80"
+                    style="width:180px;accent-color:#6c63ff;"
+                    oninput="document.getElementById('lbImg').style.width=this.value+'vw'">
+                <button onclick="closeDiagramLightbox()" style="margin-left:0.5rem;background:#e74c3c;color:#fff;border:none;padding:0.3rem 0.8rem;border-radius:6px;cursor:pointer;font-size:0.85rem;">✕ Close</button>
+            </div>
+            <div style="overflow:auto;max-height:85vh;max-width:95vw;cursor:default;" onclick="event.stopPropagation()">
+                <img id="lbImg" style="width:80vw;max-width:100%;display:block;border-radius:8px;box-shadow:0 8px 32px rgba(0,0,0,0.6);">
+            </div>
+        `;
+        overlay.onclick = closeDiagramLightbox;
+        document.body.appendChild(overlay);
+    }
+    document.getElementById('lbImg').src = src;
+    document.getElementById('lbSlider').value = 80;
+    document.getElementById('lbImg').style.width = '80vw';
+    overlay.style.display = 'flex';
+    document.addEventListener('keydown', _lbEscHandler);
+}
+
+function _lbEscHandler(e) {
+    if (e.key === 'Escape') closeDiagramLightbox();
+}
+
+function closeDiagramLightbox() {
+    const overlay = document.getElementById('diagramLightbox');
+    if (overlay) overlay.style.display = 'none';
+    document.removeEventListener('keydown', _lbEscHandler);
 }
