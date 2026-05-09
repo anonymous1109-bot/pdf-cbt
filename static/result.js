@@ -5,13 +5,22 @@
 let resultData = null;
 let activeFilter = 'all';
 
+function escapeHTML(str) {
+    if (!str) return '';
+    return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#039;');
+}
+
 async function initResult(resultId) {
     // Try sessionStorage first (instant), fallback to API
     const cached = sessionStorage.getItem('lastResult');
     if (cached) {
-        resultData = JSON.parse(cached);
+        const parsed = JSON.parse(cached);
+        if (parsed.id === resultId) {
+            resultData = parsed;
+        }
         sessionStorage.removeItem('lastResult');
-    } else {
+    }
+    if (!resultData) {
         try {
             const res = await fetch(`/api/result/${resultId}`);
             if (res.redirected || res.status === 401) {
@@ -162,7 +171,7 @@ function renderQuestionReview() {
                 let style = '';
                 if (k === q.correct_answer) style = 'color:var(--green);font-weight:600';
                 else if (k === q.user_answer && q.status === 'incorrect') style = 'color:var(--red);text-decoration:line-through';
-                return `<div style="font-size:0.85rem;margin-left:1rem;${style}">${k}. ${v}</div>`;
+                return `<div style="font-size:0.85rem;margin-left:1rem;${style}">${escapeHTML(k)}. ${escapeHTML(v)}</div>`;
             }).join('');
         }
 
@@ -174,10 +183,10 @@ function renderQuestionReview() {
 
         return `<div class="review-q ${q.status}">
             <div class="review-q-header">
-                <span class="review-q-num">Q${q.id} · ${q.subject} · ${q.topic || ''}</span>
+                <span class="review-q-num">Q${q.id} · ${escapeHTML(q.subject)} · ${escapeHTML(q.topic)}</span>
                 <span class="review-status ${q.status}">${q.status.toUpperCase()} (${q.marks_obtained >= 0 ? '+' : ''}${q.marks_obtained})</span>
             </div>
-            <div class="review-q-text">${q.text}</div>
+            <div class="review-q-text">${escapeHTML(q.text)}</div>
             ${diagramHtml}
             ${optionsReview}
             <div class="review-answers">

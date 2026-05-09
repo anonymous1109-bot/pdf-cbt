@@ -13,6 +13,11 @@ let timerInterval = null;
 let startTime = null;
 let activeSubject = 'all';
 
+function escapeHTML(str) {
+    if (!str) return '';
+    return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#039;');
+}
+
 async function initCBT(testId) {
     try {
         const res = await fetch(`/api/test/${testId}`);
@@ -131,8 +136,8 @@ function showQuestion(idx) {
         answerHTML = '<div class="options-list">' + Object.entries(q.options).map(([key, val]) => {
             const sel = selectedSet.has(key) ? 'selected' : '';
             return `<div class="option ${sel}" onclick="selectOption('${qid}','${key}','${qType}')">
-                <div class="option-marker">${key}</div>
-                <div class="option-text">${val}</div>
+                <div class="option-marker">${escapeHTML(key)}</div>
+                <div class="option-text">${escapeHTML(val)}</div>
             </div>`;
         }).join('') + '</div>';
 
@@ -144,14 +149,14 @@ function showQuestion(idx) {
     const isMarked = marked[qid];
     panel.innerHTML = `
         <div class="q-number">Question ${q.id} of ${testData.total_questions}
-            <span class="q-subject-badge ${subjClass}">${q.subject}</span>
+            <span class="q-subject-badge ${subjClass}">${escapeHTML(q.subject)}</span>
             ${typeBadge}
-            <span style="margin-left:0.5rem;font-size:0.7rem;color:var(--text-muted)">${q.topic || ''}</span>
+            <span style="margin-left:0.5rem;font-size:0.7rem;color:var(--text-muted)">${escapeHTML(q.topic)}</span>
             <span style="float:right;font-size:0.75rem;color:var(--text-muted)">
                 +${q.marks_correct || 4} / ${q.marks_incorrect || -1}
             </span>
         </div>
-        <div class="q-text">${q.text}</div>
+        <div class="q-text">${escapeHTML(q.text)}</div>
         ${diagramHTML}
         ${answerHTML}
         <div class="q-actions">

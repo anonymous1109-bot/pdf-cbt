@@ -41,6 +41,8 @@ REQUEST_DELAY = 5  # seconds between Gemini requests
 def _get_client():
     """Get a Gemini client with the current key (round-robin)."""
     global _key_index
+    if not API_KEYS:
+        raise Exception("No Gemini API keys configured. Please set GEMINI_KEY_1 in environment.")
     with _key_lock:
         key = API_KEYS[_key_index]
         _key_index = (_key_index + 1) % len(API_KEYS)
@@ -52,26 +54,74 @@ _rate_lock = threading.Lock()
 def _rate_limit_wait():
     """Enforce minimum delay between Gemini requests."""
     global _last_request_time
+    wait = 0
     with _rate_lock:
         now = time.time()
         elapsed = now - _last_request_time
         if elapsed < REQUEST_DELAY:
             wait = REQUEST_DELAY - elapsed
-            print(f"[RateLimit] Waiting {wait:.1f}s before next request")
-            time.sleep(wait)
-        _last_request_time = time.time()
+            _last_request_time = now + wait
+        else:
+            _last_request_time = now
+            
+    if wait > 0:
+        print(f"[RateLimit] Waiting {wait:.1f}s before next request")
+        time.sleep(wait)
 
 
-def _call_gemini(contents, max_retries=8, client=None):
+class QuestionSchema(BaseModel):
+    id: str
+    subject: str
+    topic: str
+    text: str
+    type: str
+    options: Optional[Dict[str, str]] = None
+    correct_answer: str
+    page_number: int
+    has_diagram: bool
+    diagram_bbox: Optional[List[float]] = None
+
+class TestSchema(BaseModel):
+    test_name: Optional[str] = "Unnamed Test"
+    subjects: Optional[List[str]] = None
+    questions: List[QuestionSchema]
+    duration_minutes: Optional[int] = 180
+
+class SubjectAnalysis(BaseModel):
+    score_comment: str
+    weak_topics: List[str]
+    strong_topics: List[str]
+    key_gaps: str
+
+class PriorityTopic(BaseModel):
+    topic: str
+    subject: str
+    reason: str
+    study_plan: str
+
+class AnalysisSchema(BaseModel):
+    summary: str
+    subject_analysis: Dict[str, SubjectAnalysis]
+    recommendations: List[str]
+    priority_topics: List[PriorityTopic]
+    common_mistakes: List[str]
+
+def _call_gemini(contents, max_retries=8, client=None, response_schema=None):
     """Call Gemini with key rotation + retry on 429."""
     keys_tried = 0
+    config = types.GenerateContentConfig()
+    if response_schema:
+        config.response_schema = response_schema
+        config.response_mime_type = "application/json"
+
     for attempt in range(max_retries):
         _rate_limit_wait()
         current_client = client if client else _get_client()
         try:
             response = current_client.models.generate_content(
                 model="gemini-2.5-flash",
-                contents=contents
+                contents=contents,
+                config=config
             )
             return response.text
         except Exception as e:
@@ -91,33 +141,6 @@ def _call_gemini(contents, max_retries=8, client=None):
                 continue
             raise
     raise Exception("Max retries exceeded for Gemini API call")
-
-
-def _parse_json(text):
-    """Extract JSON from Gemini response, handling invalid LaTeX backslash escapes."""
-    text = text.strip()
-    if text.startswith("```"):
-        text = re.sub(r'^```(?:json)?\s*', '', text)
-        text = re.sub(r'\s*```$', '', text)
-
-    def sanitize_escapes(s):
-        # Replace invalid JSON escape sequences (backslash not followed by valid escape char)
-        # e.g. raw LaTeX like \\lambda, \\sigma get double-escaped so json.loads accepts them
-        return re.sub(r'\\(?!["\\/bfnrtu])', r'\\\\', s)
-
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError:
-        try:
-            return json.loads(sanitize_escapes(text))
-        except json.JSONDecodeError:
-            match = re.search(r'\{[\s\S]*\}', text)
-            if match:
-                try:
-                    return json.loads(match.group())
-                except json.JSONDecodeError:
-                    return json.loads(sanitize_escapes(match.group()))
-            raise ValueError(f"Cannot parse JSON: {text[:300]}")
 
 
 
@@ -211,53 +234,32 @@ def extract_questions_from_pdfs(q_path, a_path, test_id, image_info, max_full_re
     all_questions = []
     test_metadata = {}
     
-    # Process in chunks of 3 pages to ensure high detail and no skipped questions
-    chunk_size = 3
-    for start_pg in range(1, total_pages + 1, chunk_size):
-        end_pg = min(start_pg + chunk_size - 1, total_pages)
-        print(f"[Process] Analyzing pages {start_pg} to {end_pg}...")
+    upload_client = _get_client()
+    q_file, a_file = None, None
+    try:
+        q_file = upload_client.files.upload(file=q_path)
+        a_file = upload_client.files.upload(file=a_path)
+
+        for f in [q_file, a_file]:
+            while f.state.name == "PROCESSING":
+                time.sleep(2)
+                f = upload_client.files.get(name=f.name)
+            if f.state.name == "FAILED":
+                raise Exception("Gemini failed to process file")
+
+        img_summary = f"I extracted {len(image_info)} images from the question paper PDF."
         
-        for attempt in range(max_full_retries):
-            upload_client = _get_client()
-            _rate_limit_wait()
-
-            q_file, a_file = None, None
-            try:
-                q_file = upload_client.files.upload(file=q_path)
-                a_file = upload_client.files.upload(file=a_path)
-
-                for f in [q_file, a_file]:
-                    while f.state.name == "PROCESSING":
-                        time.sleep(2)
-                        f = upload_client.files.get(name=f.name)
-                    if f.state.name == "FAILED":
-                        raise Exception("Gemini failed to process file")
-
-                img_summary = f"I extracted {len(image_info)} images from the question paper PDF."
+        # Process in chunks of 3 pages to ensure high detail and no skipped questions
+        chunk_size = 3
+        for start_pg in range(1, total_pages + 1, chunk_size):
+            end_pg = min(start_pg + chunk_size - 1, total_pages)
+            print(f"[Process] Analyzing pages {start_pg} to {end_pg}...")
             
-            prompt = f"""You are a JEE/NEET exam paper analyzer. I'm giving you two PDFs.
+            for attempt in range(max_full_retries):
+                prompt = f"""You are a JEE/NEET exam paper analyzer. I'm giving you two PDFs.
 FOCUS ONLY ON QUESTIONS LOCATED ON PAGES {start_pg} TO {end_pg} of the Question Paper.
 
 Extract ALL questions from these specific pages and match them with answers from the Answer Key.
-Return ONLY valid JSON:
-{{
-  "test_name": "Name of test (if found)",
-  "subjects": ["Physics", "Chemistry", "Mathematics"],
-  "questions": [
-    {{
-      "id": <original_question_number>,
-      "subject": "Physics/Chemistry/Mathematics",
-      "topic": "Topic Name",
-      "text": "Question stem ONLY.",
-      "type": "MCQ_SINGLE",
-      "options": {{"A": "...", "B": "...", "C": "...", "D": "..."}},
-      "correct_answer": "B",
-      "page_number": <page_in_pdf>,
-      "has_diagram": true,
-      "diagram_bbox": [ymin, xmin, ymax, xmax]
-    }}
-  ]
-}}
 
 CRITICAL RULES:
 1. ONLY extract questions that physically start on pages {start_pg} through {end_pg}.
@@ -266,34 +268,45 @@ CRITICAL RULES:
 4. If a question is an INTEGER type, set options to null.
 5. Match the question number accurately with the answer key."""
 
-            try:
-                text = _call_gemini([prompt, q_file, a_file], client=upload_client)
-                data = _parse_json(text)
-                
-                if 'questions' in data:
-                    all_questions.extend(data['questions'])
-                if not test_metadata and 'test_name' in data:
-                    test_metadata = {
-                        'test_name': data.get('test_name', 'Unnamed Test'),
-                        'subjects': data.get('subjects', []),
-                        'duration_minutes': data.get('duration_minutes', 180)
-                    }
-                break # Success, move to next chunk
-
-            except Exception as e:
-                err = str(e)
-                if "FIXED_CLIENT_EXHAUSTED" in err:
-                    print(f"[Process] Key exhausted, retrying chunk...")
-                    continue
-                print(f"[Process] Chunk Error: {err}")
-                if attempt == max_full_retries - 1:
-                    print(f"[Process] Skipping chunk {start_pg}-{end_pg} after max retries.")
-            finally:
                 try:
-                    if q_file: upload_client.files.delete(name=q_file.name)
-                    if a_file: upload_client.files.delete(name=a_file.name)
+                    text = _call_gemini([prompt, q_file, a_file], client=upload_client, response_schema=TestSchema)
+                    data = json.loads(text)
+                    
+                    if 'questions' in data:
+                        all_questions.extend(data['questions'])
+                    if not test_metadata and 'test_name' in data:
+                        test_metadata = {
+                            'test_name': data.get('test_name', 'Unnamed Test'),
+                            'subjects': data.get('subjects', []),
+                            'duration_minutes': data.get('duration_minutes', 180)
+                        }
+                    break # Success, move to next chunk
+
                 except Exception as e:
-                    print(f"[Warn] Failed to delete Gemini files: {e}")
+                    err = str(e)
+                    if "FIXED_CLIENT_EXHAUSTED" in err:
+                        print(f"[Process] Key exhausted, re-uploading on new key and retrying chunk...")
+                        try:
+                            if q_file: upload_client.files.delete(name=q_file.name)
+                            if a_file: upload_client.files.delete(name=a_file.name)
+                        except: pass
+                        upload_client = _get_client()
+                        q_file = upload_client.files.upload(file=q_path)
+                        a_file = upload_client.files.upload(file=a_path)
+                        for f in [q_file, a_file]:
+                            while f.state.name == "PROCESSING":
+                                time.sleep(2)
+                                f = upload_client.files.get(name=f.name)
+                        continue
+                    print(f"[Process] Chunk Error: {err}")
+                    if attempt == max_full_retries - 1:
+                        print(f"[Process] Skipping chunk {start_pg}-{end_pg} after max retries.")
+    finally:
+        try:
+            if q_file: upload_client.files.delete(name=q_file.name)
+            if a_file: upload_client.files.delete(name=a_file.name)
+        except Exception as e:
+            print(f"[Warn] Failed to delete Gemini files: {e}")
 
     # Deduplicate questions by ID
     unique_qs = {}
@@ -348,8 +361,8 @@ Return ONLY valid JSON:
 
 Be specific, encouraging, and actionable."""
 
-    text = _call_gemini(prompt)
-    return _parse_json(text)
+    text = _call_gemini(prompt, response_schema=AnalysisSchema)
+    return json.loads(text)
 
 
 def _check_answer(user_ans, correct_ans, q_type):
@@ -406,7 +419,7 @@ def register_page():
 
 @app.route('/api/register', methods=['POST'])
 def api_register():
-    data = request.json
+    data = request.get_json(silent=True) or {}
     name = (data.get('name') or '').strip()
     email = (data.get('email') or '').strip()
     password = data.get('password', '')
@@ -424,7 +437,7 @@ def api_register():
 
 @app.route('/api/login', methods=['POST'])
 def api_login():
-    data = request.json
+    data = request.get_json(silent=True) or {}
     email = (data.get('email') or '').strip()
     password = data.get('password', '')
     user_dict = database.get_user_by_email(email)
@@ -495,31 +508,25 @@ def process_pdfs():
             from PIL import Image as PILImage, ImageStat
 
             def _trim_leading_text(img):
-                """Scan from the top and trim text lines that leaked above the diagram.
-                Uses dark-pixel fraction per row to robustly detect the gap between
-                question text and the actual figure, even on slightly gray backgrounds."""
+                """Scan from the top and trim text lines that leaked above the diagram."""
                 gray = img.convert('L')
                 width, height = gray.size
                 if width == 0 or height == 0:
                     return img
 
+                pixels = list(gray.getdata())
                 saw_content = False
                 new_top = 0
 
                 for y in range(height):
-                    row = gray.crop((0, y, width, y + 1))
-                    pixels = list(row.getdata())
-                    # Count pixels darker than 210 (text ink, diagram lines)
-                    dark_count = sum(1 for p in pixels if p < 210)
-                    dark_frac = dark_count / width
-
-                    if dark_frac > 0.01:   # row has content (>1% dark pixels)
+                    row = pixels[y * width:(y + 1) * width]
+                    dark_count = sum(1 for p in row if p < 210)
+                    if (dark_count / width) > 0.01:
                         saw_content = True
-                    elif saw_content:       # mostly-white row after content
+                    elif saw_content:
                         new_top = y
                         break
 
-                # Only trim if gap starts far enough in to be meaningful text
                 if new_top > 4:
                     return img.crop((0, new_top, width, height))
                 return img
@@ -534,7 +541,7 @@ def process_pdfs():
                         if os.path.exists(page_path):
                             img = PILImage.open(page_path)
                             W, H = img.size
-                            ymin, xmin, ymax, xmax = bbox
+                            ymin, xmin, ymax, xmax = [float(c) for c in bbox]
                             left   = max(0, (xmin / 1000) * W - 20)
                             top    = max(0, (ymin / 1000) * H - 20)
                             right  = min(W, (xmax / 1000) * W + 20)
@@ -571,6 +578,9 @@ def process_pdfs():
         })
     except Exception as e:
         print(f"[Process] ERROR: {traceback.format_exc()}")
+        img_dir = os.path.join(app.root_path, 'static', 'test_images', test_id)
+        import shutil
+        shutil.rmtree(img_dir, ignore_errors=True)
         error_msg = str(e)
         if 'quota' in error_msg.lower() or '429' in error_msg or 'exhausted' in error_msg.lower():
             error_msg = ("⚠️ All API keys exhausted! Please wait a few minutes for quota reset.")
@@ -627,7 +637,7 @@ def update_crop(test_id, q_id):
     if not re.match(r'^[a-zA-Z0-9_-]{4,16}$', test_id):
         return jsonify({'error': 'Invalid test ID'}), 400
 
-    data = request.json
+    data = request.get_json(silent=True) or {}
     x1, y1, x2, y2 = int(data['x1']), int(data['y1']), int(data['x2']), int(data['y2'])
     page_num = data['page_number']
 
@@ -694,7 +704,7 @@ def remove_crop(test_id, q_id):
 @login_required
 def rename_test(test_id):
     """Rename a test."""
-    data = request.json
+    data = request.get_json(silent=True) or {}
     new_name = (data.get('name') or '').strip()
     if not new_name:
         return jsonify({'error': 'Name cannot be empty'}), 400
@@ -746,7 +756,7 @@ def get_test_data(test_id):
 @app.route('/api/submit', methods=['POST'])
 @login_required
 def submit_test():
-    data = request.json
+    data = request.get_json(silent=True) or {}
     test_id = data.get('test_id')
     user_answers = data.get('answers', {})
     time_taken = data.get('time_taken_seconds', 0)
@@ -891,7 +901,7 @@ def export_data():
 @login_required
 def import_data():
     try:
-        data = request.json
+        data = request.get_json(silent=True) or {}
         if not data or 'tests' not in data:
             return jsonify({"error": "Invalid format"}), 400
         
