@@ -4,7 +4,9 @@ Features: 4-key rotation, 5s delay, diagram extraction via PyMuPDF, integer ques
 """
 import os, json, uuid, re, time, traceback, threading
 from datetime import datetime
-from flask import Flask, render_template, request, jsonify, redirect, url_for
+from flask import Flask, render_template, request, jsonify, redirect, url_for, session
+from flask_login import LoginManager, UserMixin, login_user, logout_user, login_required, current_user
+from werkzeug.security import generate_password_hash, check_password_hash
 from google import genai
 from google.genai import types
 from pydantic import BaseModel
@@ -352,14 +354,89 @@ def _check_answer(user_ans, correct_ans, q_type):
 
 
 # ======================================================================
+# FLASK-LOGIN SETUP
+# ======================================================================
+login_manager = LoginManager()
+login_manager.init_app(app)
+login_manager.login_view = 'login_page'
+app.secret_key = os.environ.get('SECRET_KEY', 'dev-secret-change-in-production-1234')
+
+class User(UserMixin):
+    def __init__(self, user_dict):
+        self.id = user_dict['id']
+        self.email = user_dict['email']
+        self.name = user_dict.get('name', '')
+
+@login_manager.user_loader
+def load_user(user_id):
+    u = database.get_user_by_id(int(user_id))
+    if u:
+        return User(u)
+    return None
+
+
+# ======================================================================
+# AUTH ROUTES
+# ======================================================================
+@app.route('/login')
+def login_page():
+    if current_user.is_authenticated:
+        return redirect(url_for('index'))
+    return render_template('auth.html', mode='login')
+
+@app.route('/register')
+def register_page():
+    if current_user.is_authenticated:
+        return redirect(url_for('index'))
+    return render_template('auth.html', mode='register')
+
+@app.route('/api/register', methods=['POST'])
+def api_register():
+    data = request.json
+    name = (data.get('name') or '').strip()
+    email = (data.get('email') or '').strip()
+    password = data.get('password', '')
+    if not email or not password or not name:
+        return jsonify({'error': 'Name, email and password are required'}), 400
+    if len(password) < 6:
+        return jsonify({'error': 'Password must be at least 6 characters'}), 400
+    pw_hash = generate_password_hash(password)
+    user_id = database.create_user(email, pw_hash, name)
+    if user_id is None:
+        return jsonify({'error': 'An account with this email already exists'}), 409
+    user_dict = database.get_user_by_id(user_id)
+    login_user(User(user_dict), remember=True)
+    return jsonify({'success': True, 'redirect': '/'})
+
+@app.route('/api/login', methods=['POST'])
+def api_login():
+    data = request.json
+    email = (data.get('email') or '').strip()
+    password = data.get('password', '')
+    user_dict = database.get_user_by_email(email)
+    if not user_dict or not check_password_hash(user_dict['password_hash'], password):
+        return jsonify({'error': 'Incorrect email or password'}), 401
+    login_user(User(user_dict), remember=True)
+    return jsonify({'success': True, 'redirect': '/'})
+
+@app.route('/logout')
+@login_required
+def logout():
+    logout_user()
+    return redirect(url_for('login_page'))
+
+
+# ======================================================================
 # ROUTES
 # ======================================================================
 @app.route('/')
+@login_required
 def index():
     return render_template('index.html')
 
 
 @app.route('/api/process', methods=['POST'])
+@login_required
 def process_pdfs():
     if 'question_paper' not in request.files or 'answer_key' not in request.files:
         return jsonify({"error": "Both PDFs required"}), 400
@@ -451,7 +528,7 @@ def process_pdfs():
         
         # Save as draft — needs diagram review before going live
         test_data['status'] = 'draft'
-        database.save_test(test_id, test_data.get('test_name', 'Test'), test_data)
+        database.save_test(test_id, test_data.get('test_name', 'Test'), test_data, current_user.id)
 
         print(f"[Process] ✅ Extracted {qcount} questions, {len(diagram_questions)} diagram questions")
         return jsonify({
@@ -482,8 +559,9 @@ def process_pdfs():
 # ======================================================================
 
 @app.route('/review/<test_id>')
+@login_required
 def review_page(test_id):
-    test = database.get_test(test_id)
+    test = database.get_test(test_id, current_user.id)
     if not test:
         return redirect(url_for('index'))
     return render_template('review.html', test_id=test_id)
@@ -695,7 +773,7 @@ def submit_test():
         'questions': results, 'analysis': analysis, 'submitted_at': datetime.now().isoformat()
     }
     
-    database.save_attempt(result_id, test_id, test.get('test_name', 'Test'), total_score, max_score, result_data)
+    database.save_attempt(result_id, test_id, test.get('test_name', 'Test'), total_score, max_score, result_data, current_user.id)
     return jsonify(result_data)
 
 
@@ -719,21 +797,25 @@ def get_result_data(result_id):
 # ======================================================================
 
 @app.route('/api/dashboard')
+@login_required
 def get_dashboard_data():
+    uid = current_user.id
     return jsonify({
-        "tests": database.get_all_tests(),
-        "attempts": database.get_all_attempts()
+        "tests": database.get_all_tests(uid),
+        "attempts": database.get_all_attempts(uid),
+        "user_name": current_user.name
     })
 
 @app.route('/api/attempt/<attempt_id>', methods=['DELETE'])
+@login_required
 def delete_attempt_route(attempt_id):
-    database.delete_attempt(attempt_id)
+    database.delete_attempt(attempt_id, current_user.id)
     return jsonify({"success": True})
 
 @app.route('/api/test/<test_id>', methods=['DELETE'])
+@login_required
 def delete_test_route(test_id):
-    database.delete_test(test_id)
-    # Remove associated static images
+    database.delete_test(test_id, current_user.id)
     img_dir = os.path.join(app.root_path, 'static', 'test_images', test_id)
     if os.path.exists(img_dir):
         import shutil
@@ -745,15 +827,18 @@ def mistakes_page():
     return render_template('mistakes.html')
 
 @app.route('/api/mistakes')
+@login_required
 def get_mistakes_data():
-    return jsonify(database.get_all_mistakes())
+    return jsonify(database.get_all_mistakes(current_user.id))
 
 @app.route('/api/export')
+@login_required
 def export_data():
+    uid = current_user.id
     return jsonify({
         "version": 1,
-        "tests": [database.get_test(t['id']) for t in database.get_all_tests()],
-        "attempts": [database.get_attempt(a['id']) for a in database.get_all_attempts()]
+        "tests": [database.get_test(t['id'], uid) for t in database.get_all_tests(uid)],
+        "attempts": [database.get_attempt(a['id'], uid) for a in database.get_all_attempts(uid)]
     })
 
 @app.route('/api/import', methods=['POST'])
