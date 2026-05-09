@@ -4,7 +4,7 @@ Features: 4-key rotation, 5s delay, diagram extraction via PyMuPDF, integer ques
 """
 import os, json, uuid, re, time, traceback, threading
 from datetime import datetime
-from flask import Flask, render_template, request, jsonify, redirect, url_for, session
+from flask import Flask, render_template, request, jsonify, redirect, url_for, session, send_from_directory
 from flask_login import LoginManager, UserMixin, login_user, logout_user, login_required, current_user
 from werkzeug.security import generate_password_hash, check_password_hash
 from google import genai
