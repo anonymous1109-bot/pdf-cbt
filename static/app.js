@@ -100,7 +100,7 @@ function showQuestion(idx) {
     let diagramHTML = '';
     if (q.has_diagram && q.diagram_crop) {
         diagramHTML = `<div class="diagram-section">
-            <img src="/test_images/${testData.test_id}/${q.diagram_crop}" 
+            <img src="${q.diagram_crop.startsWith('data:') ? q.diagram_crop : `/test_images/${testData.test_id}/${q.diagram_crop}`}" 
                  alt="Figure for Q${q.id}" class="diagram-img"
                  onerror="this.parentElement.style.display='none'">
         </div>`;

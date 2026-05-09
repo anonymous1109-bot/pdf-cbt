@@ -2,7 +2,7 @@
 PDF to CBT Converter — Flask Backend
 Features: 4-key rotation, 5s delay, diagram extraction via PyMuPDF, integer questions
 """
-import os, json, uuid, re, time, traceback, threading
+import os, json, uuid, re, time, traceback, threading, base64, io
 from datetime import datetime
 from flask import Flask, render_template, request, jsonify, redirect, url_for, session, send_from_directory
 from flask_login import LoginManager, UserMixin, login_user, logout_user, login_required, current_user
@@ -719,11 +719,17 @@ def manage_crop(test_id, q_id):
         if right <= left or bottom <= top:
             return jsonify({'error': 'Invalid crop region'}), 400
         cropped = img.crop((left, top, right, bottom))
-        cropped.save(fpath)
-        q['diagram_crop'] = fname
+        
+        # Convert to Base64 for permanent storage in the DB
+        buffered = io.BytesIO()
+        cropped.save(buffered, format="PNG")
+        img_str = base64.b64encode(buffered.getvalue()).decode()
+        b64_uri = f"data:image/png;base64,{img_str}"
+        
+        q['diagram_crop'] = b64_uri
         q['has_diagram'] = True
         database.save_test(test_id, test.get('test_name', 'Test'), test, current_user.id)
-        return jsonify({'success': True, 'diagram_crop': fname, 'cache_bust': str(uuid.uuid4())[:8]})
+        return jsonify({'success': True, 'diagram_crop': b64_uri, 'cache_bust': str(uuid.uuid4())[:8]})
     except Exception as e:
         print(f"[Warn] Crop error: {e}")
         return jsonify({'error': str(e)}), 500

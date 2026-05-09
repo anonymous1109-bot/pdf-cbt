@@ -176,7 +176,7 @@ function renderQuestionReview() {
         }
 
         const diagramHtml = q.diagram_crop
-            ? `<img src="/test_images/${resultData.test_id}/${q.diagram_crop}" 
+            ? `<img src="${q.diagram_crop.startsWith('data:') ? q.diagram_crop : `/test_images/${resultData.test_id}/${q.diagram_crop}`}" 
                    style="max-width:100%;max-height:250px;border-radius:8px;margin:0.5rem 0;background:#fff;padding:4px"
                    onerror="this.style.display='none'">`
             : '';
