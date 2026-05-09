@@ -166,17 +166,21 @@ database.init_db()
 UPLOAD_DIR = os.path.join(os.path.dirname(__file__), 'uploads')
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
-# Always ensure static image directory exists (works on Render without Dockerfile symlinks)
-STATIC_IMG_DIR = os.path.join(os.path.dirname(__file__), 'static', 'test_images')
-os.makedirs(STATIC_IMG_DIR, exist_ok=True)
+# Use persistent storage for images
+IMAGE_DIR = os.path.join(database.DATA_DIR, 'test_images')
+os.makedirs(IMAGE_DIR, exist_ok=True)
 
+# Define route to serve images from persistent storage
+@app.route('/test_images/<test_id>/<filename>')
+def serve_test_image(test_id, filename):
+    return send_from_directory(os.path.join(IMAGE_DIR, test_id), filename)
 
 # ======================================================================
 # PDF IMAGE EXTRACTION — Extract individual diagrams from PDF
 # ======================================================================
 def extract_images_from_pdf(pdf_path, test_id):
-    """Extract individual embedded images from PDF and render page crops for diagrams."""
-    img_dir = os.path.join(os.path.dirname(__file__), 'static', 'test_images', test_id)
+    """Extract individual embedded images from PDF."""
+    img_dir = os.path.join(IMAGE_DIR, test_id)
     os.makedirs(img_dir, exist_ok=True)
 
     doc = fitz.open(pdf_path)
@@ -208,12 +212,6 @@ def extract_images_from_pdf(pdf_path, test_id):
                 global_idx += 1
             except Exception:
                 continue
-
-    # Also render each page as fallback for vector diagrams
-    for page_num in range(len(doc)):
-        page = doc[page_num]
-        pix = page.get_pixmap(dpi=250)
-        pix.save(os.path.join(img_dir, f"page_{page_num + 1}.png"))
 
     doc.close()
     print(f"[Images] Extracted {len(extracted)} individual images from PDF")
@@ -462,35 +460,7 @@ def index():
     return render_template('index.html')
 
 
-@app.route('/api/process', methods=['POST'])
-@login_required
-def process_pdfs():
-    if 'question_paper' not in request.files or 'answer_key' not in request.files:
-        return jsonify({"error": "Both PDFs required"}), 400
-    q_file = request.files['question_paper']
-    a_file = request.files['answer_key']
-    if not q_file.filename.endswith('.pdf') or not a_file.filename.endswith('.pdf'):
-        return jsonify({"error": "Only PDF files accepted"}), 400
-
-    test_id = str(uuid.uuid4())[:8]
-    q_path = os.path.join(UPLOAD_DIR, f"{test_id}_q.pdf")
-    a_path = os.path.join(UPLOAD_DIR, f"{test_id}_a.pdf")
-    q_file.save(q_path)
-    a_file.save(a_path)
-
-    valid = True
-    with open(q_path, 'rb') as f:
-        if f.read(4) != b'%PDF': valid = False
-    with open(a_path, 'rb') as f:
-        if f.read(4) != b'%PDF': valid = False
-
-    if not valid:
-        try:
-            os.remove(q_path)
-            os.remove(a_path)
-        except Exception: pass
-        return jsonify({"error": "One or both files are not valid PDFs (corrupted or renamed)"}), 400
-
+def _background_process_pdfs(q_path, a_path, test_id, user_id):
     try:
         # Step 1: Extract individual images from question paper PDF
         print(f"[Process] Extracting images for {test_id}...")
@@ -531,13 +501,25 @@ def process_pdfs():
                     return img.crop((0, new_top, width, height))
                 return img
 
-            img_dir = os.path.join(app.root_path, 'static', 'test_images', test_id)
+            img_dir = os.path.join(IMAGE_DIR, test_id)
+            doc_for_rendering = None
+            
             for q in test_data.get('questions', []):
                 if q.get('has_diagram') and q.get('diagram_bbox') and q.get('page_number'):
                     bbox = q['diagram_bbox']
                     pg = q['page_number']
                     if isinstance(bbox, list) and len(bbox) == 4:
                         page_path = os.path.join(img_dir, f"page_{pg}.png")
+                        
+                        # Render page on demand to save RAM/Time
+                        if not os.path.exists(page_path):
+                            if doc_for_rendering is None:
+                                doc_for_rendering = fitz.open(q_path)
+                            if 0 <= pg - 1 < len(doc_for_rendering):
+                                page = doc_for_rendering[pg - 1]
+                                pix = page.get_pixmap(dpi=250)
+                                pix.save(page_path)
+                                
                         if os.path.exists(page_path):
                             img = PILImage.open(page_path)
                             W, H = img.size
@@ -554,6 +536,8 @@ def process_pdfs():
                                 cropped.save(os.path.join(img_dir, fname))
                                 q['diagram_crop'] = fname
                                 print(f"[Diagram] Cropped diagram for Q{q['id']} -> {fname}")
+            if doc_for_rendering:
+                doc_for_rendering.close()
         except Exception as e:
             print(f"[Diagram] Crop error: {e}")
 
@@ -562,33 +546,78 @@ def process_pdfs():
         
         # Save as draft — needs diagram review before going live
         test_data['status'] = 'draft'
-        database.save_test(test_id, test_data.get('test_name', 'Test'), test_data, current_user.id)
+        test_data['needs_review'] = len(diagram_questions) > 0
+        database.save_test(test_id, test_data.get('test_name', 'Test'), test_data, user_id)
 
         print(f"[Process] ✅ Extracted {qcount} questions, {len(diagram_questions)} diagram questions")
-        return jsonify({
-            "success": True,
-            "test_id": test_id,
-            "test_name": test_data.get('test_name', 'Test'),
-            "total_questions": test_data.get('total_questions', qcount),
-            "subjects": test_data.get('subjects', []),
-            "duration_minutes": test_data.get('duration_minutes', 180),
-            "needs_review": len(diagram_questions) > 0,
-            "diagram_count": len(diagram_questions),
-            "review_url": f"/review/{test_id}"
-        })
+        
     except Exception as e:
         print(f"[Process] ERROR: {traceback.format_exc()}")
-        img_dir = os.path.join(app.root_path, 'static', 'test_images', test_id)
+        img_dir = os.path.join(IMAGE_DIR, test_id)
         import shutil
         shutil.rmtree(img_dir, ignore_errors=True)
         error_msg = str(e)
         if 'quota' in error_msg.lower() or '429' in error_msg or 'exhausted' in error_msg.lower():
             error_msg = ("⚠️ All API keys exhausted! Please wait a few minutes for quota reset.")
-        return jsonify({"error": error_msg}), 500
+        database.save_test(test_id, "Error", {"status": "error", "error": error_msg}, user_id)
     finally:
         for p in [q_path, a_path]:
             try: os.remove(p)
             except: pass
+
+@app.route('/api/process_status/<test_id>')
+@login_required
+def process_status(test_id):
+    test_data = database.get_test(test_id, current_user.id)
+    if not test_data:
+        return jsonify({"error": "Not found"}), 404
+    return jsonify({
+        "status": test_data.get('status', 'ready'),
+        "error": test_data.get('error'),
+        "needs_review": test_data.get('needs_review', False)
+    })
+
+@app.route('/api/process', methods=['POST'])
+@login_required
+def process_pdfs():
+    if 'question_paper' not in request.files or 'answer_key' not in request.files:
+        return jsonify({"error": "Both PDFs required"}), 400
+    q_file = request.files['question_paper']
+    a_file = request.files['answer_key']
+    if not q_file.filename.endswith('.pdf') or not a_file.filename.endswith('.pdf'):
+        return jsonify({"error": "Only PDF files accepted"}), 400
+
+    test_id = str(uuid.uuid4())[:8]
+    q_path = os.path.join(UPLOAD_DIR, f"{test_id}_q.pdf")
+    a_path = os.path.join(UPLOAD_DIR, f"{test_id}_a.pdf")
+    q_file.save(q_path)
+    a_file.save(a_path)
+
+    valid = True
+    with open(q_path, 'rb') as f:
+        if f.read(4) != b'%PDF': valid = False
+    with open(a_path, 'rb') as f:
+        if f.read(4) != b'%PDF': valid = False
+
+    if not valid:
+        try:
+            os.remove(q_path)
+            os.remove(a_path)
+        except Exception: pass
+        return jsonify({"error": "One or both files are not valid PDFs (corrupted or renamed)"}), 400
+
+    # Mark as processing in DB immediately
+    database.save_test(test_id, "Processing...", {"status": "processing", "progress": 0}, current_user.id)
+    
+    # Start background processing thread
+    t = threading.Thread(target=_background_process_pdfs, args=(q_path, a_path, test_id, current_user.id))
+    t.start()
+
+    return jsonify({
+        "success": True,
+        "test_id": test_id,
+        "status": "processing"
+    })
 
 
 # ======================================================================
@@ -641,7 +670,7 @@ def update_crop(test_id, q_id):
     x1, y1, x2, y2 = int(data['x1']), int(data['y1']), int(data['x2']), int(data['y2'])
     page_num = data['page_number']
 
-    img_dir = os.path.join(app.root_path, 'static', 'test_images', test_id)
+    img_dir = os.path.join(IMAGE_DIR, test_id)
     page_path = os.path.join(img_dir, f'page_{page_num}.png')
     if not os.path.exists(page_path):
         return jsonify({'error': 'Page image not found'}), 404
@@ -681,7 +710,7 @@ def remove_crop(test_id, q_id):
     if not re.match(r'^[a-zA-Z0-9_-]{4,16}$', test_id):
         return jsonify({'error': 'Invalid test ID'}), 400
 
-    img_dir = os.path.join(app.root_path, 'static', 'test_images', test_id)
+    img_dir = os.path.join(IMAGE_DIR, test_id)
     fname = f'q{q_id}_diagram.png'
     fpath = os.path.join(img_dir, fname)
     try:
@@ -871,7 +900,7 @@ def delete_attempt_route(attempt_id):
 @login_required
 def delete_test_route(test_id):
     database.delete_test(test_id, current_user.id)
-    img_dir = os.path.join(app.root_path, 'static', 'test_images', test_id)
+    img_dir = os.path.join(IMAGE_DIR, test_id)
     if os.path.exists(img_dir):
         import shutil
         shutil.rmtree(img_dir, ignore_errors=True)

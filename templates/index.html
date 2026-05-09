@@ -368,17 +368,35 @@
             try {
                 const res = await fetch('/api/process', { method: 'POST', body: formData });
                 const data = await res.json();
-                clearInterval(interval);
-                if (data.success) {
-                    if (data.needs_review) {
-                        statusEl.textContent = `✅ ${data.total_questions} questions extracted! ${data.diagram_count} diagrams need review...`;
-                        setTimeout(() => window.location.href = data.review_url, 1500);
-                    } else {
-                        statusEl.textContent = `✅ ${data.total_questions} questions extracted! Redirecting...`;
-                        setTimeout(() => window.location.href = `/test/${data.test_id}`, 1500);
-                    }
+                if (data.status === 'processing') {
+                    statusEl.textContent = 'Processing in background... You can safely close this or wait.';
+                    const poll = setInterval(async () => {
+                        try {
+                            const s_res = await fetch(`/api/process_status/${data.test_id}`);
+                            if (s_res.redirected) { window.location.href = s_res.url; return; }
+                            const s_data = await s_res.json();
+                            
+                            if (s_data.status === 'draft' || s_data.status === 'ready') {
+                                clearInterval(interval);
+                                clearInterval(poll);
+                                if (s_data.needs_review) {
+                                    statusEl.textContent = `✅ Questions extracted! Diagrams need review...`;
+                                    setTimeout(() => window.location.href = `/review/${data.test_id}`, 1500);
+                                } else {
+                                    statusEl.textContent = `✅ Questions extracted! Redirecting...`;
+                                    setTimeout(() => window.location.href = `/test/${data.test_id}`, 1500);
+                                }
+                            } else if (s_data.status === 'error') {
+                                clearInterval(interval);
+                                clearInterval(poll);
+                                alert('Error: ' + (s_data.error || 'Failed to process PDFs'));
+                                processing.classList.remove('active');
+                            }
+                        } catch (e) { console.error('Polling error:', e); }
+                    }, 5000);
                 } else {
-                    alert('Error: ' + (data.error || 'Unknown error'));
+                    clearInterval(interval);
+                    if (data.error) alert('Error: ' + data.error);
                     processing.classList.remove('active');
                 }
             } catch (err) {

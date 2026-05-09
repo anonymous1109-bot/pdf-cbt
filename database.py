@@ -7,13 +7,14 @@ DATA_DIR = os.environ.get('DATA_DIR', os.path.dirname(__file__))
 DB_PATH = os.path.join(DATA_DIR, 'tests.db')
 
 def get_db():
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False, timeout=15)
     conn.row_factory = sqlite3.Row
     return conn
 
 def init_db():
     conn = get_db()
     c = conn.cursor()
+    c.execute('PRAGMA journal_mode=WAL;')
     # Users table
     c.execute('''
         CREATE TABLE IF NOT EXISTS users (
