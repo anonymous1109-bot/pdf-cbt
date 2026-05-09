@@ -227,7 +227,8 @@
                         <div class="test-card-actions">
                             ${isDraft
                                 ? `<a class="btn-review-link" href="/review/${t.id}">✂️ Review</a>`
-                                : `<button class="btn-take" onclick="openSetupModal('${t.id}', ${t.duration_minutes || 180})">▶ Take Test</button>`
+                                : `<button class="btn-take" onclick="openSetupModal('${t.id}', ${t.duration_minutes || 180})">▶ Take Test</button>
+                                   <a class="btn-review-link" href="/review/${t.id}" title="Edit Questions & Diagrams">✏️ Edit</a>`
                             }
                             <button class="btn-rename" onclick="renameTest('${t.id}', event)" title="Rename">✏️</button>
                             <button class="btn-del" onclick="deleteTest('${t.id}', event)" title="Delete">🗑</button>
@@ -395,13 +396,9 @@
                             if (s_data.status === 'draft' || s_data.status === 'ready') {
                                 clearInterval(interval);
                                 clearInterval(poll);
-                                if (s_data.needs_review) {
-                                    statusEl.textContent = `✅ Questions extracted! Diagrams need review...`;
-                                    setTimeout(() => window.location.href = `/review/${data.test_id}`, 1500);
-                                } else {
-                                    statusEl.textContent = `✅ Questions extracted! Redirecting...`;
-                                    setTimeout(() => window.location.href = `/test/${data.test_id}`, 1500);
-                                }
+                                // Always go to review first — user must confirm before timed test starts
+                                statusEl.textContent = `✅ Done! Taking you to the Review page...`;
+                                setTimeout(() => window.location.href = `/review/${data.test_id}`, 1000);
                             } else if (s_data.status === 'error') {
                                 clearInterval(interval);
                                 clearInterval(poll);
