@@ -234,7 +234,7 @@ function renderList() {
                     <button class="btn-xs success ${ok?'active':''}" onclick="toggleConfirm(${q.id})">${ok ? '✓ Confirmed' : 'Confirm ✓'}</button>
                 </div>
             </div>
-            ${hasCrop ? `<img class="q-thumb" src="/static/test_images/${TEST_ID}/${q.diagram_crop}?v=${Date.now()}" onclick="openCrop(${q.id})" title="Click to re-crop">` : ''}
+            ${hasCrop ? `<img class="q-thumb" src="/test_images/${TEST_ID}/${q.diagram_crop}?v=${Date.now()}" onclick="openCrop(${q.id})" title="Click to re-crop">` : ''}
         </div>`;
     }).join('') || `<div style="text-align:center;padding:3rem;color:var(--text-muted)">No questions match this filter</div>`;
 }
@@ -345,7 +345,7 @@ function openCrop(qId) {
 
     pageImg = new Image();
     pageImg.onload = () => { zoom = 1; drawCrop(); };
-    pageImg.src = `/static/test_images/${TEST_ID}/${cropQ.page_image}`;
+    pageImg.src = `/test_images/${TEST_ID}/${cropQ.page_image}`;
 }
 
 function closeCrop() {

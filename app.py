@@ -782,6 +782,8 @@ def finalize_test(test_id):
 def test_page(test_id):
     if not database.get_test(test_id, current_user.id):
         return redirect(url_for('index'))
+    # Record start time server-side so the client can't fake it
+    session[f'start_{test_id}'] = time.time()
     return render_template('test.html', test_id=test_id)
 
 
@@ -808,7 +810,10 @@ def submit_test():
     data = request.get_json(silent=True) or {}
     test_id = data.get('test_id')
     user_answers = data.get('answers', {})
-    time_taken = data.get('time_taken_seconds', 0)
+    
+    # Server is the source of truth for time taken — ignore client's value
+    start_time = session.pop(f'start_{test_id}', None)
+    time_taken = int(time.time() - start_time) if start_time else 0
 
     test = database.get_test(test_id, current_user.id)
     if not test:

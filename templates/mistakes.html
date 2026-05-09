@@ -103,7 +103,7 @@
                             `;
                             
                             qs.forEach(q => {
-                                const diagramHtml = q.diagram_crop ? `<img src="/static/test_images/${q.test_id}/${q.diagram_crop}" style="max-width:100%; max-height:200px; border:1px solid var(--border); border-radius:4px; margin-bottom:1rem; display:block; background:#fff;">` : '';
+                                const diagramHtml = q.diagram_crop ? `<img src="/test_images/${q.test_id}/${q.diagram_crop}" style="max-width:100%; max-height:200px; border:1px solid var(--border); border-radius:4px; margin-bottom:1rem; display:block; background:#fff;">` : '';
                                 html += `
                                 <div class="mistake-card">
                                     <div class="mistake-header">

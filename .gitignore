@@ -1,3 +1,20 @@
+# Environment secrets
 .env
-tests.db
+
+# User uploads and generated content — NEVER commit these
+uploads/
 static/test_images/
+data/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Databases
+*.db
+*.sqlite3
+
+# Logs
+*.log
