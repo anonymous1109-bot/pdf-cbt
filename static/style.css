@@ -94,8 +94,6 @@ body { font-family:'Inter',sans-serif; background:var(--bg-primary); color:var(-
 .option.selected .option-marker { background:var(--accent); border-color:var(--accent); color:#fff; }
 .option-text { flex:1; line-height:1.5; padding-top:2px; }
 
-.integer-input { width:200px; padding:0.85rem 1rem; background:var(--bg-glass); border:1px solid var(--border); border-radius:var(--radius); color:var(--text-primary); font-family:inherit; font-size:1.1rem; font-weight:600; outline:none; transition:border-color 0.2s; }
-.integer-input:focus { border-color:var(--accent); }
 
 .q-actions { display:flex; gap:0.75rem; margin-top:2rem; flex-wrap:wrap; }
 .btn-sm { padding:0.6rem 1.25rem; font-size:0.85rem; border-radius:8px; }

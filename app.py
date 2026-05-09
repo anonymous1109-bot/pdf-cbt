@@ -828,6 +828,7 @@ def delete_test_route(test_id):
     return jsonify({"success": True})
 
 @app.route('/mistakes')
+@login_required
 def mistakes_page():
     return render_template('mistakes.html')
 
@@ -847,6 +848,7 @@ def export_data():
     })
 
 @app.route('/api/import', methods=['POST'])
+@login_required
 def import_data():
     try:
         data = request.json

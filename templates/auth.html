@@ -256,11 +256,12 @@
         function setLoading(loading) {
             const btn = document.getElementById('submitBtn');
             if (loading) {
+                btn.dataset.label = btn.innerHTML; // save BEFORE changing
                 btn.disabled = true;
                 btn.innerHTML = '<span class="spinner"></span> Please wait...';
             } else {
                 btn.disabled = false;
-                btn.innerHTML = btn.dataset.label || btn.innerHTML;
+                btn.innerHTML = btn.dataset.label || 'Submit';
             }
         }
 

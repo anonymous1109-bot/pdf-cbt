@@ -16,6 +16,10 @@ let activeSubject = 'all';
 async function initCBT(testId) {
     try {
         const res = await fetch(`/api/test/${testId}`);
+        if (res.redirected || res.status === 401) {
+            window.location.href = '/login';
+            return;
+        }
         testData = await res.json();
         if (testData.error) { alert(testData.error); return; }
 
@@ -174,6 +178,8 @@ function showQuestion(idx) {
 
 function handleIntegerInput(qid, value) {
     const cleaned = value.replace(/[^0-9.\-]/g, '');
+    const inp = document.getElementById('integerAnswer');
+    if (inp) inp.value = cleaned;
     if (cleaned) {
         answers[qid] = cleaned;
     } else {
@@ -277,6 +283,10 @@ async function submitTest(testId) {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ test_id: testId, answers, time_taken_seconds: timeTaken })
         });
+        if (res.redirected || res.status === 401) {
+            window.location.href = '/login';
+            return;
+        }
         const data = await res.json();
         if (data.result_id) {
             sessionStorage.setItem('lastResult', JSON.stringify(data));
@@ -291,6 +301,7 @@ async function submitTest(testId) {
     }
 }
 
+let mathRetries = 0;
 function renderMath() {
     if (typeof renderMathInElement !== 'undefined') {
         renderMathInElement(document.getElementById('questionPanel'), {
@@ -302,7 +313,7 @@ function renderMath() {
             ],
             throwOnError: false
         });
-    } else {
+    } else if (mathRetries++ < 20) {
         setTimeout(renderMath, 200);
     }
 }

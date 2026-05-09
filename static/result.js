@@ -14,6 +14,10 @@ async function initResult(resultId) {
     } else {
         try {
             const res = await fetch(`/api/result/${resultId}`);
+            if (res.redirected || res.status === 401) {
+                window.location.href = '/login';
+                return;
+            }
             resultData = await res.json();
             if (resultData.error) { alert(resultData.error); return; }
         } catch (e) { alert('Failed to load results'); return; }
@@ -162,12 +166,19 @@ function renderQuestionReview() {
             }).join('');
         }
 
+        const diagramHtml = q.diagram_crop
+            ? `<img src="/static/test_images/${resultData.test_id}/${q.diagram_crop}" 
+                   style="max-width:100%;max-height:250px;border-radius:8px;margin:0.5rem 0;background:#fff;padding:4px"
+                   onerror="this.style.display='none'">`
+            : '';
+
         return `<div class="review-q ${q.status}">
             <div class="review-q-header">
                 <span class="review-q-num">Q${q.id} · ${q.subject} · ${q.topic || ''}</span>
                 <span class="review-status ${q.status}">${q.status.toUpperCase()} (${q.marks_obtained >= 0 ? '+' : ''}${q.marks_obtained})</span>
             </div>
             <div class="review-q-text">${q.text}</div>
+            ${diagramHtml}
             ${optionsReview}
             <div class="review-answers">
                 <span class="review-correct">Correct: ${q.correct_answer}</span>
@@ -184,6 +195,7 @@ function setFilter(f) {
     renderQuestionReview();
 }
 
+let mathRetries = 0;
 function renderMathResult() {
     if (typeof renderMathInElement !== 'undefined') {
         renderMathInElement(document.getElementById('resultApp'), {
@@ -195,7 +207,7 @@ function renderMathResult() {
             ],
             throwOnError: false
         });
-    } else {
+    } else if (mathRetries++ < 20) {
         setTimeout(renderMathResult, 200);
     }
 }

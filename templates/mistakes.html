@@ -37,6 +37,10 @@
         async function loadMistakes() {
             try {
                 const res = await fetch('/api/mistakes');
+                if (res.redirected || res.status === 401) {
+                    window.location.href = '/login';
+                    return;
+                }
                 const mistakes = await res.json();
                 
                 document.getElementById('loading').style.display = 'none';
